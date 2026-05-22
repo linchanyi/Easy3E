@@ -1,0 +1,51 @@
+# ============================================
+# Easy3E .gitignore
+# ============================================
+
+# === Blender installation (download by user) ===
+tmp/
+
+# === Pretrained model weights (download separately) ===
+checkpoint/
+
+# === Python cache ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === Large model files ===
+*.safetensors
+*.ckpt
+*.pth
+*.bin
+
+# === Data artifacts (auto-generated per case) ===
+*/render/
+*/edit_views/
+*/output/
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Logs ===
+*.log
+
+# === Archives ===
+*.tar.xz
+*.tar.gz
+*.zip
+
+# === Misc ===
+image.png
