@@ -103,8 +103,8 @@ render.image_settings.color_mode = "RGBA"
 render.resolution_x = args.resolution
 render.resolution_y = args.resolution
 render.resolution_percentage = 100
-render.threads_mode = 'FIXED'  # 使用固定线程数模式
-render.threads = 32  # 设置线程数
+render.threads_mode = 'FIXED'  # Use fixed thread count mode
+render.threads = 32  # Set thread count
 
 scene.cycles.device = "GPU"
 scene.cycles.samples = 128   # 128
@@ -529,7 +529,7 @@ def normalize_scene(shrink =1.0) -> Tuple[float, Vector]:
     return scale, offset
 
 def apply_norm(object_set, scale, offset):
-    # 遍历集合中的每一个对象
+    # Iterate over each object in the set
     scene_root_objects = [obj for obj in object_set if not obj.parent]
     # create an empty object to be used as a parent for all root objects
     scene = bpy.data.objects.new("ParentEmpty", None)
@@ -563,12 +563,12 @@ def del_folder(folder_path):
     if os.path.exists(folder_path):
         try:
             shutil.rmtree(folder_path)
-            print(f"文件夹 '{folder_path}' 及其所有内容已成功删除。")
+            print(f"Folder '{folder_path}' and all its contents have been successfully deleted.")
         except OSError as e:
-            # 可能的错误包括权限问题等
-            print(f"错误: {e}")
+            # Possible errors include permission issues etc.
+            print(f"Error: {e}")
     else:
-        print(f"文件夹 '{folder_path}' 不存在。")
+        print(f"Folder '{folder_path}' does not exist.")
 
 def render_and_save(view_id, object_uid, len_val, azimuth, elevation, distance, ortho=False):
     # print(view_id)
@@ -584,32 +584,32 @@ def scene_meshes():
 
 def obj_black(objs):
     for obj in objs:
-        # --- 1. 获取或创建材质 ---
+        # --- 1. Get or create material ---
         if obj.data.materials:
             material = obj.data.materials[0]
         else:
             material = bpy.data.materials.new(name=f"{OBJECT_NAME}_Black_Matte")
             obj.data.materials.append(material)
 
-        # --- 2. 查找 Principled BSDF 节点 ---
+        # --- 2. Find Principled BSDF node ---
         material.use_nodes = True
         nodes = material.node_tree.nodes
         principled_bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
 
         if principled_bsdf:
         
-        # --- 3. 关键参数调整 ---
+        # --- 3. Key parameter adjustments ---
         
-            # 纯黑色 (R=0.0, G=0.0, B=0.0, A=1.0)
+            # Pure black (R=0.0, G=0.0, B=0.0, A=1.0)
             principled_bsdf.inputs['Base Color'].default_value = (0.0, 0.0, 0.0, 1.0)
         
-            # 完全哑光（最大粗糙度），消除镜面反射
+            # Fully matte (max roughness), eliminate specular reflection
             principled_bsdf.inputs['Roughness'].default_value = 1.0 
         
-            # 非金属
+            # Non-metallic
             principled_bsdf.inputs['Metallic'].default_value = 0.0
         
-            # 消除任何残留的镜面反射
+            # Eliminate any residual specular reflection
             principled_bsdf.inputs['Specular'].default_value = 0.0
 
 def save_images(object_file: str, mask_file: str) -> None:
@@ -623,7 +623,7 @@ def save_images(object_file: str, mask_file: str) -> None:
     # obj = bpy.context.selected_objects[0] if bpy.context.selected_objects else None
 
     # if obj:
-    #     obj.rotation_euler[0] += math.radians(-90)  # 绕 Z 轴右旋 90 度
+#     obj.rotation_euler[0] += math.radians(-90)  # Rotate -90 degrees around Z axis
     
     
     lights = [obj for obj in bpy.context.scene.objects if obj.type == 'LIGHT']
@@ -648,7 +648,7 @@ def save_images(object_file: str, mask_file: str) -> None:
     # main_light_data.energy = 7
     # main_light.rotation_euler = (math.radians(135), 0.0, math.radians(45))
 
-# # === 补光 ===
+# # === Fill light ===
 #     fill_light_data = bpy.data.lights.new(name='FillLight', type='SUN')
 #     fill_light = bpy.data.objects.new(name='FillLight', object_data=fill_light_data)
 #     bpy.context.collection.objects.link(fill_light)
@@ -656,7 +656,7 @@ def save_images(object_file: str, mask_file: str) -> None:
 #     fill_light_data.energy = 3
 #     fill_light_data.use_shadow = False
 #     fill_light_data.specular_factor = 0.2
-#     fill_light_data.angle = 0.2  # 也调软
+#     fill_light_data.angle = 0.2  # Also soften
 #     fill_light.rotation_euler = (-0.05, 0.0, 0.0)
   
 

@@ -18,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-# PIL 可选依赖：没有的话，grid 仅返回 None
+# PIL optional dependency: if not available, grid only returns None
 try:
     from PIL import Image
     HAS_PIL = True
@@ -31,26 +31,26 @@ ArrayLike = Union[np.ndarray, torch.Tensor]
 import torch
 
 def _smoothstep(x: torch.Tensor):
-    # x ∈ [0,1] → [0,1]，C1 连续
+    # x ∈ [0,1] → [0,1], C1 continuous
     x = x.clamp(0, 1)
     return x * x * (3 - 2 * x)
 
 def soft_box_weight_zyx(coords: torch.Tensor,
                         boxes_zyx,
-                        band_in: float = 2.0,     # 盒内向内的平滑带宽（单位：体素）
-                        band_out: float = 1.0,    # 盒外向外的平滑带宽
-                        alpha_at_boundary: float = 0.5  # 边界处新特征占比（0.5=对半）
+                        band_in: float = 2.0,     # Inward smoothing bandwidth inside box (in voxels)
+                        band_out: float = 1.0,    # Outward smoothing bandwidth outside box
+                        alpha_at_boundary: float = 0.5  # New feature weight at boundary (0.5 = half-half)
                         ) -> torch.Tensor:
     """
-    coords: [N,4] 其中 1/2/3 -> x/y/z
-    boxes_zyx: 形如  [ [[z0,z1],[y0,y1],[x0,x1]], ... ]（闭区间）
-    返回: w_new ∈ [0,1], 形状 [N]，表示“新特征占比”
-    规则：
-      - 盒内深处(>=band_in): w=1
-      - 盒外远处(>=band_out): w=0
-      - 边界处(距离=0): w=alpha_at_boundary
-      - 过渡区：平滑插值
-      - 多盒：取 max（任何盒子影响都能提升 w）
+    coords: [N,4] where 1/2/3 -> x/y/z
+    boxes_zyx: list of [[z0,z1],[y0,y1],[x0,x1], ...] (closed intervals)
+    Returns: w_new ∈ [0,1], shape [N], representing "new feature weight"
+    Rules:
+      - Deep inside box (>=band_in): w=1
+      - Far outside box (>=band_out): w=0
+      - At boundary (distance=0): w=alpha_at_boundary
+      - Transition zone: smooth interpolation
+      - Multiple boxes: take max (any box influence can increase w)
     """
     if not boxes_zyx:
         return torch.zeros(coords.size(0), device=coords.device)
@@ -63,41 +63,41 @@ def soft_box_weight_zyx(coords: torch.Tensor,
         y0, y1 = float(yr[0]), float(yr[1])
         x0, x1 = float(xr[0]), float(xr[1])
 
-        # --- inside 逻辑：到最近面的 L∞ 距离（体素格上更贴近“格子厚度”的感觉）
+        # --- Inside logic: L∞ distance to nearest face (closer to "grid thickness" on voxel grid)
         dx_in = torch.minimum(x - x0, x1 - x)
         dy_in = torch.minimum(y - y0, y1 - y)
         dz_in = torch.minimum(z - z0, z1 - z)
-        d_in = torch.minimum(torch.minimum(dx_in, dy_in), dz_in)  # <0 表示不在盒内
+        d_in = torch.minimum(torch.minimum(dx_in, dy_in), dz_in)  # <0 means not inside box
 
         inside = d_in >= 0
         w_inside = torch.zeros_like(w_total)
         if band_in > 0:
-            t = (d_in / band_in).clamp(0, 1)  # 0=边界, 1=带宽内侧尽头
+            t = (d_in / band_in).clamp(0, 1)  # 0=boundary, 1=inner edge of bandwidth
             w_inside = alpha_at_boundary + (1 - alpha_at_boundary) * _smoothstep(t)
         else:
-            w_inside = torch.ones_like(w_total)  # 无内带宽则盒内全 1
+            w_inside = torch.ones_like(w_total)  # No inner bandwidth: all 1 inside box
         w_inside = torch.where(inside, w_inside, torch.zeros_like(w_inside))
 
-        # --- outside 逻辑：到盒子的 L∞ 外部距离（0=恰在边界/投影内）
-        # L∞ 外距：各轴到区间的外侧距离取 max
+        # --- Outside logic: L∞ external distance to box (0=at boundary/projected inside)
+        # L∞ external distance: max of per-axis distances to interval
         dx_out = torch.maximum(x0 - x, x - x1)
         dy_out = torch.maximum(y0 - y, y - y1)
         dz_out = torch.maximum(z0 - z, z - z1)
-        d_out_inf = torch.maximum(torch.maximum(dx_out, dy_out), dz_out)  # >0 在盒外，=0 与边界对齐/投影内
+        d_out_inf = torch.maximum(torch.maximum(dx_out, dy_out), dz_out)  # >0 outside box, =0 aligned with boundary/projected inside
 
         outside = d_out_inf > 0
         w_outside = torch.zeros_like(w_total)
         if band_out > 0:
-            t = (d_out_inf / band_out).clamp(0, 1)  # 0=边界, 1=带宽外侧尽头
-            # 边界 α → 远外 0，平滑衰减
+            t = (d_out_inf / band_out).clamp(0, 1)  # 0=boundary, 1=outer edge of bandwidth
+            # Boundary α → far outside 0, smooth decay
             w_outside = alpha_at_boundary * (1 - _smoothstep(t))
         else:
             w_outside = torch.zeros_like(w_total)
         w_outside = torch.where(outside, w_outside, torch.zeros_like(w_outside))
 
-        # 合并单盒贡献：盒内或盒外都给出一个 w，取最大
+        # Merge single-box contribution: both inside and outside give a w, take max
         w_box = torch.maximum(w_inside, w_outside)
-        w_total = torch.maximum(w_total, w_box)  # 多盒取 max
+        w_total = torch.maximum(w_total, w_box)  # Multiple boxes: take max
 
     return w_total  # [N]
 
@@ -112,21 +112,21 @@ def _hash4(c: torch.Tensor) -> torch.Tensor:
 
 def weight_ring_distance1_outside(coords: torch.Tensor, boxes_zyx, alpha: float = 0.5) -> torch.Tensor:
     """
-    仅对“盒外且到盒子 L∞ 距离==1”的体素做融合：w=alpha。
-    盒内任何位置 w=1；盒外距离>=2 的位置 w=0。多盒取最大。
-    coords: [N,4]（1/2/3 -> x/y/z；盒子为闭区间）
-    返回: w ∈ [0,1], [N]
+    Only blend voxels that are outside the box with L∞ distance==1: w=alpha.
+    Inside box at any position: w=1; outside with distance>=2: w=0. Multiple boxes: take max.
+    coords: [N,4] (1/2/3 -> x/y/z; boxes use closed intervals)
+    Returns: w ∈ [0,1], [N]
     """
     if not boxes_zyx:
         return torch.zeros(coords.size(0), device=coords.device)
 
-    # 用整数网格，避免浮点 ==1 的比较问题
+    # Use integer grid to avoid floating-point ==1 comparison issues
     x = coords[:,1].long()
     y = coords[:,2].long()
     z = coords[:,3].long()
     device = coords.device
 
-    # w 用 float，便于后续线性融合
+    # Use float for w, convenient for subsequent linear blending
     w_total = torch.zeros_like(x, dtype=torch.float32, device=device)
 
     for (zr, yr, xr) in boxes_zyx:
@@ -134,43 +134,43 @@ def weight_ring_distance1_outside(coords: torch.Tensor, boxes_zyx, alpha: float 
         y0, y1 = int(yr[0]), int(yr[1])
         x0, x1 = int(xr[0]), int(xr[1])
 
-        # inside（闭区间）
+        # inside (closed interval)
         inside = (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1) & (z >= z0) & (z <= z1)
 
-        # L∞ 外距（严格整数“层数”）
+        # L∞ external distance (strict integer "layer count")
         dx_out = torch.maximum(x0 - x, x - x1).clamp_min(0)
         dy_out = torch.maximum(y0 - y, y - y1).clamp_min(0)
         dz_out = torch.maximum(z0 - z, z - z1).clamp_min(0)
         d_out = torch.maximum(torch.maximum(dx_out, dy_out), dz_out)  # long
 
-        # 盒内：w=1；盒外且 d_out==1：w=alpha；盒外且 d_out>=2：w=0
+        # Inside: w=1; outside with d_out==1: w=alpha; outside with d_out>=2: w=0
         w_box = torch.zeros_like(w_total)
         w_box = torch.where(inside, torch.ones_like(w_box), w_box)
         w_box = torch.where((~inside) & (d_out == 1), torch.full_like(w_box, float(alpha)), w_box)
 
-        # 多盒取最大（谁更偏新听谁）
+        # Multiple boxes: take max (whichever favors new wins)
         w_total = torch.maximum(w_total, w_box)
 
     return w_total
 
 def blend_feats_ring1_outside(sample, ori_sample, boxes_zyx, alpha=0.5):
     """
-    只在“盒外距离=1”的体素做融合；盒内=新，盒外远处=原。
-    对 ori 中不存在的新坐标：强制新（w=1）。
+    Only blend at voxels with distance=1 outside box; inside=new, far outside=original.
+    For new coordinates not present in ori: force new (w=1).
     """
     device = sample.feats.device
     coords      = sample.coords.to(device)
     coords_ori  = ori_sample.coords.to(device)
 
-    # 权重
+    # Weight
     w = weight_ring_distance1_outside(coords, boxes_zyx, alpha=alpha).to(device)  # [N], float32
 
-    # 新增坐标（ori 无对应）强制新
+    # New coordinates (not in ori): force new
     is_new = ~torch.isin(_hash4(coords), _hash4(coords_ori))
     w = torch.where(is_new, torch.ones_like(w), w)
 
-    # —— 按你“旧风格”做坐标对齐（遍历张量行，用 c.tolist()）——
-    ori_map = {tuple(c.tolist()): i for i, c in enumerate(coords_ori)}  # 关键修复：不要 .tolist() 再 .tolist()
+    # Coordinate alignment (iterate over tensor rows, use c.tolist())
+    ori_map = {tuple(c.tolist()): i for i, c in enumerate(coords_ori)}  # Key fix: don't .tolist() then .tolist() again
     idx_s, idx_o = [], []
     for i, c in enumerate(coords):
         j = ori_map.get(tuple(c.tolist()))
@@ -184,7 +184,7 @@ def blend_feats_ring1_outside(sample, ori_sample, boxes_zyx, alpha=0.5):
     idx_o = torch.tensor(idx_o, dtype=torch.long, device=device)
 
     new_feats = sample.feats.clone()
-    # 确保权重 dtype 与 feats 一致
+    # Ensure weight dtype matches feats
     w_exp = w[idx_s].unsqueeze(1).to(new_feats.dtype)  # [K,1]
     new_feats[idx_s] = w_exp * new_feats[idx_s] + (1 - w_exp) * ori_sample.feats[idx_o].to(new_feats.dtype)
     return sample.replace(feats=new_feats)
@@ -205,21 +205,21 @@ def _stat(x, name):
     }
 
 def make_loss_closure(decode_voxel_fn, edit_mask, ortho_scale, tx, ty, flip_y):
-    # 你也可以把 tau/rot90k 等作为参数传进来
+    # You can also pass tau/rot90k etc. as parameters
     def closure(z):
         with torch.enable_grad():
             sigma = decode_voxel_fn(z)
-            # 和你主流程一致（soft 版本更利于梯度）
+            # Consistent with main pipeline (soft version is better for gradients)
             tau = 0.55
-            sil = _silhouette_from_sigma(sigma, tau=tau)    # 或者你的 OR-soft 版本
+            sil = _silhouette_from_sigma(sigma, tau=tau)    # Or your OR-soft version
             sil_img = project_ortho_no_center(
                 sil, out_hw=edit_mask.shape[-2:],
                 ortho_scale=ortho_scale, tx=tx, ty=ty, flip_y=flip_y
             )
             sil_img = apply_orient_2d(sil_img, rot90k=3)
-            # 用“无 clamp”的稳定 BCE，避免 clamp 把梯度截断
+            # Stable BCE without clamp, to avoid clamp cutting off gradients
             eps = 1e-6
-            pred = sil_img.clamp(eps, 1-eps)  # 只为数值稳定（如果你怀疑 clamp 截梯度，可临时去掉看差异）
+            pred = sil_img.clamp(eps, 1-eps)  # Only for numerical stability (if you suspect clamp cuts gradients, try removing temporarily)
             L = -(edit_mask*torch.log(pred) + (1-edit_mask)*torch.log(1-pred)).mean()
             return L
     return closure
@@ -227,23 +227,23 @@ def make_loss_closure(decode_voxel_fn, edit_mask, ortho_scale, tx, ty, flip_y):
 
 def fd_directional_check(loss_closure, x, num_dirs=3, eps_scale=1e-3):
     """
-    验证 autograd 的 <grad, v> 是否≈ 有限差分 (L(x+eps v)-L(x-eps v))/(2eps)
-    - loss_closure: 传入一个函数 f(z)-> L 的标量（会在 no_grad 下重新跑一次前向）
-    - x: 当前 latent（叶子张量）
+    Verify that autograd's <grad, v> ≈ finite difference (L(x+eps v)-L(x-eps v))/(2eps)
+    - loss_closure: a function f(z) -> scalar L (will re-run forward under no_grad)
+    - x: current latent (leaf tensor)
     """
     x = x.detach()
     x.requires_grad_(True)
-    L = loss_closure(x)                # 标量
-    g = torch.autograd.grad(L, x)[0]   # autograd 梯度
+    L = loss_closure(x)                # scalar
+    g = torch.autograd.grad(L, x)[0]   # autograd gradient
 
     gdot_vs, fd_vs, rel_errs = [], [], []
     for k in range(num_dirs):
         v = torch.randn_like(x)
         v = v / (v.norm() + 1e-8)
-        # 方向导数（autograd）
+        # Directional derivative (autograd)
         gdot = float((g * v).sum())
 
-        # 有限差分（no_grad）
+        # Finite difference (no_grad)
         with torch.no_grad():
             eps = eps_scale * (x.std() + 1e-8)
             Lp = loss_closure(x + eps * v)
@@ -262,8 +262,8 @@ def print_stats(d):
 
 def grad_chain_diagnostics(L, x_t, *, sigma, sil, sil_img):
     """
-    打印 L 对每一层的梯度强度：dL/d(sil_img), dL/d(sil), dL/d(sigma), dL/d(x_t)
-    注意：要在计算了 L 之后、图还在的时候调用。
+    Print gradient strength of L w.r.t. each layer: dL/d(sil_img), dL/d(sil), dL/d(sigma), dL/d(x_t)
+    Note: must be called after L is computed and the computation graph is still alive.
     """
     stats = {}
 
@@ -272,33 +272,33 @@ def grad_chain_diagnostics(L, x_t, *, sigma, sil, sil_img):
     if g_silimg is not None:
         stats["dL/d(sil_img)"] = _stat(g_silimg, "g_silimg")
     else:
-        stats["dL/d(sil_img)"] = "None (梯度没到 sil_img，通常是 clamp/ detach/ hard-threshold 截断)"
+        stats["dL/d(sil_img)"] = "None (gradient did not reach sil_img, usually due to clamp/detach/hard-threshold truncation)"
 
     # dL/d(sil)
     g_sil = torch.autograd.grad(L, sil, retain_graph=True, create_graph=False, allow_unused=True)[0]
     if g_sil is not None:
         stats["dL/d(sil)"] = _stat(g_sil, "g_sil")
     else:
-        stats["dL/d(sil)"] = "None (投影/方向处理可能把梯度截断)"
+        stats["dL/d(sil)"] = "None (projection/orientation processing may have truncated gradient)"
 
     # dL/d(sigma)
     g_sigma = torch.autograd.grad(L, sigma, retain_graph=True, create_graph=False, allow_unused=True)[0]
     if g_sigma is not None:
         stats["dL/d(sigma)"] = _stat(g_sigma, "g_sigma")
     else:
-        stats["dL/d(sigma)"] = "None (decoder 内部可能 detach/ 非可微)"
+        stats["dL/d(sigma)"] = "None (decoder may have internal detach/non-differentiable ops)"
 
     # dL/d(x_t)
     g_x = torch.autograd.grad(L, x_t, retain_graph=False, create_graph=False, allow_unused=True)[0]
     if g_x is not None:
         stats["dL/d(x_t)"] = _stat(g_x, "g_x")
     else:
-        stats["dL/d(x_t)"] = "None (x_t 没有参与可微路径/被替换)"
+        stats["dL/d(x_t)"] = "None (x_t did not participate in differentiable path / was replaced)"
 
     print_stats(stats)
     return g_x, stats
 def save_overlay_png(pred01, gt01, path):
-    """pred01/gt01: [1,1,H,W] 或 [H,W]。红=GT(mask)，绿=Pred(投影)。"""
+    """pred01/gt01: [1,1,H,W] or [H,W]. Red=GT(mask), Green=Pred(projection)."""
     import numpy as np, os
     from PIL import Image
     p = pred01.detach().squeeze().clamp(0,1).cpu().numpy()
@@ -330,27 +330,27 @@ def _silhouette_from_sigma(
     sigma,                       # [B,1,*,*,*]
     depth_axis='y',              # 'z'|'y'|'x'
     invert_depth=False,
-    prob_mode='logit',           # 'logit' 用 sigmoid(σ/τ); 'density' 把 σ 当非负密度再压到 [0,1]
+    prob_mode='logit',           # 'logit': use sigmoid(σ/τ); 'density': treat σ as non-negative density then compress to [0,1]
     tau=0.6,
-    hard=False,                  # True: 前向0/1 + STE；False: 纯软
+    hard=False,                  # True: forward 0/1 + STE; False: pure soft
     thr_voxel=0.5,
     edge_blur_ks=1.2,
-    # 新增：
-    agg='poisson',               # 'poisson'（推荐）| 'noisy_or'
-    kappa=10.0,                   # Poisson-OR 强度（可退火 4→12）
-    topk=4                    # 仅用前 K 个深度；None 表示用全部，建议 8 或 16
+    # Additional:
+    agg='poisson',               # 'poisson' (recommended) | 'noisy_or'
+    kappa=10.0,                   # Poisson-OR strength (can anneal 4→12)
+    topk=4                    # Only use top K depths; None = use all, recommend 8 or 16
 ):
     """
-    目标：视线上只要命中一次即为白。
-    - Poisson-OR:  S = 1 - exp(-kappa * sum_z p_z)      （推荐，梯度稳定）
-    - Noisy-OR:    S = 1 - Π_z (1 - p_z)                 （深度多时梯度易变小）
-    - hard=True: 前向硬阈值 + 直通估计（反传走软 S）
-    返回: [B,1,H,W]
+    Goal: any hit along the ray makes it white.
+    - Poisson-OR:  S = 1 - exp(-kappa * sum_z p_z)      (recommended, stable gradients)
+    - Noisy-OR:    S = 1 - Π_z (1 - p_z)                 (gradients diminish with many depths)
+    - hard=True: forward hard threshold + straight-through estimator (backprop through soft S)
+    Returns: [B,1,H,W]
     """
     import torch
     import torch.nn.functional as F
 
-    # --- 1) 把“深度轴”放到 dim=2 -> [B,1,D,H,W]
+    # --- 1) Move "depth axis" to dim=2 -> [B,1,D,H,W]
     axis_to_dim = {'z': 2, 'y': 3, 'x': 4}
     da = axis_to_dim[depth_axis]
     if da != 2:
@@ -360,23 +360,23 @@ def _silhouette_from_sigma(
     if invert_depth:
         sigma = sigma.flip(2)
 
-    # --- 2) 概率化 p_z ∈ [0,1]
+    # --- 2) Convert to probability p_z ∈ [0,1]
     if prob_mode == 'logit':
-        p = torch.sigmoid(sigma / tau)       # 若 σ 是 logit，σ=0 <-> p=0.5
-        thr = float(thr_voxel)               # 通常 0.5（等价 σ>0）
+        p = torch.sigmoid(sigma / tau)       # If σ is logit, σ=0 <-> p=0.5
+        thr = float(thr_voxel)               # Usually 0.5 (equivalent to σ>0)
     elif prob_mode == 'density':
-        # 若 σ 是非负密度，可用 1-exp(-c*σ) 更有物理意义；这里给个保守版：
+        # If σ is non-negative density, 1-exp(-c*σ) is more physically meaningful; here a conservative version:
         p = torch.clamp(sigma, min=0)
         p = p / (p.max().detach() + 1e-8)
         thr = float(thr_voxel)
     else:
         raise ValueError("prob_mode must be 'logit' or 'density'.")
 
-    # --- 3) 仅取 Top-K 深度（可选；表面体素通常只在少数层上有响应）
+    # --- 3) Only take Top-K depths (optional; surface voxels usually respond on only a few layers)
     if topk is not None and topk > 0 and topk < p.shape[2]:
         p = torch.topk(p, k=topk, dim=2).values  # [B,1,K,H,W]
 
-    # --- 4) 沿深度合成
+    # --- 4) Composite along depth
     if agg == 'poisson':
         # S = 1 - exp(-kappa * sum_z p_z)
         S_soft = 1.0 - torch.exp(-kappa * p.sum(dim=2))
@@ -386,7 +386,7 @@ def _silhouette_from_sigma(
     else:
         raise ValueError("agg must be 'poisson' or 'noisy_or'.")
 
-    # --- 5) 可选 2D 平滑（柔化锯齿）
+    # --- 5) Optional 2D smoothing (soften aliasing)
     if edge_blur_ks and edge_blur_ks > 1:
         k = int(edge_blur_ks); pad = k//2
         S_soft = F.avg_pool2d(F.pad(S_soft, (pad,pad,pad,pad), mode='reflect'), k, stride=1)
@@ -394,13 +394,13 @@ def _silhouette_from_sigma(
     if not hard:
         return S_soft  # [B,1,H,W]
 
-    # --- 6) 硬轮廓 + STE（前向硬，反传沿软）
+    # --- 6) Hard silhouette + STE (forward hard, backprop through soft)
     P_hard = (p.max(dim=2).values > thr).float()   # [B,1,H,W]
     return P_hard + (S_soft - S_soft.detach())
 
 def apply_orient_2d(img, flip_x=False, flip_y=False, rot90k=0, swap_xy=False):
-    """img: [B,1,H,W]。按需做 2D 方向修正；可微。rot90k ∈ {0,1,2,3}"""
-    # 旋转 90*k
+    """img: [B,1,H,W]. Apply 2D orientation correction as needed; differentiable. rot90k ∈ {0,1,2,3}"""
+    # Rotate 90*k
     
     k = int(rot90k) % 4
     k = 1
@@ -410,10 +410,10 @@ def apply_orient_2d(img, flip_x=False, flip_y=False, rot90k=0, swap_xy=False):
         img = img.flip(-2).flip(-1)
     elif k == 3:  # -90°
         img = img.transpose(-2, -1).flip(-1)
-    # 交换 XY（如需要）
+    # Swap XY (if needed)
     if swap_xy:
         img = img.transpose(-2, -1)
-    # 水平/竖直翻转
+    # Horizontal/vertical flip
     if flip_x:
         img = img.flip(-1)
     if flip_y:
@@ -422,12 +422,12 @@ def apply_orient_2d(img, flip_x=False, flip_y=False, rot90k=0, swap_xy=False):
 def project_ortho_no_center(sil_world, out_hw, ortho_scale: float,
                                 tx: float = 0.0, ty: float = 0.0, flip_y: bool = False):
     """
-    不做“自动居中”的正交投影采样：
-        - sil_world: [B,1,Hs,Ws]，对应世界平面 (x,y)∈[-0.5,0.5]^2 的前视投影
-        - out_hw: (H,W) 目标分辨率（=编辑mask分辨率）
-        - ortho_scale: == Blender 的 cam.data.ortho_scale（图像宽覆盖的世界宽度）
-        - tx, ty: 世界单位的平移（与 Blender 语义一致），默认0
-        - flip_y: 竖直方向翻转开关（如遇上下颠倒设 True）
+    Orthographic projection sampling without "auto-centering":
+        - sil_world: [B,1,Hs,Ws], corresponds to front-view projection of world plane (x,y)∈[-0.5,0.5]^2
+        - out_hw: (H,W) target resolution (= edit mask resolution)
+        - ortho_scale: == Blender's cam.data.ortho_scale (world width covered by image width)
+        - tx, ty: world-unit translation (same semantics as Blender), default 0
+        - flip_y: vertical flip switch (set True if upside-down)
     """
     B = sil_world.shape[0]
     H, W = int(out_hw[0]), int(out_hw[1])
@@ -439,28 +439,28 @@ def project_ortho_no_center(sil_world, out_hw, ortho_scale: float,
     grid = F.affine_grid(theta, size=(B, 1, H, W), align_corners=True)
     img = F.grid_sample(sil_world, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
     return img
-# ---------- 形状/空间对齐 & 池化 ----------
+# ---------- Shape/Spatial Alignment & Pooling ----------
 def _resolve_viz_base(feature_path, fallback="."):
     if feature_path is None:
         return fallback
-    # 若存在且是目录，直接用
+    # If exists and is a directory, use directly
     if os.path.exists(feature_path) and os.path.isdir(feature_path):
         return feature_path
-    # 若存在且是文件 -> 用其父目录
+    # If exists and is a file -> use its parent directory
     if os.path.exists(feature_path) and os.path.isfile(feature_path):
         return os.path.dirname(feature_path)
-    # 若不存在，但看起来像“文件路径”（有扩展名）-> 用父目录
+    # If doesn't exist but looks like a "file path" (has extension) -> use parent directory
     root, ext = os.path.splitext(feature_path)
-    if ext:  # .pkl/.pt/.npy/.png 等
+    if ext:  # .pkl/.pt/.npy/.png etc.
         return os.path.dirname(feature_path) or fallback
-    # 否则当成目录用
+    # Otherwise treat as directory
     return feature_path
 def _align_spatial(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     """
-    将 x 的维度对齐到 ref:  (B,C,[D,]H,W)，并在通道维做 expand。
+    Align x's dimensions to ref: (B,C,[D,]H,W), and expand along channel dim.
     """
     while x.dim() < ref.dim():
-        x = x.unsqueeze(1)  # 在 C 维补
+        x = x.unsqueeze(1)  # Add C dim
     if x.size(1) != ref.size(1):
         x = x.expand(-1, ref.size(1), *([-1] * (ref.dim() - 2)))
     return x
@@ -468,7 +468,7 @@ def _align_spatial(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 
 def _avg_pool_nd(x: torch.Tensor, k: int) -> torch.Tensor:
     """
-    2D/3D 自适应平均池化（保持 stride=1, padding=kernel//2）。
+    2D/3D adaptive average pooling (stride=1, padding=kernel//2).
     """
     if x.dim() == 4:
         return F.avg_pool2d(x, k, 1, k // 2)
@@ -480,7 +480,7 @@ def _avg_pool_nd(x: torch.Tensor, k: int) -> torch.Tensor:
 
 def _max_pool_nd(x: torch.Tensor, k: int) -> torch.Tensor:
     """
-    2D/3D 自适应最大池化（保持 stride=1, padding=kernel//2）。
+    2D/3D adaptive max pooling (stride=1, padding=kernel//2).
     """
     if x.dim() == 4:
         return F.max_pool2d(x, k, 1, k // 2)
@@ -490,12 +490,12 @@ def _max_pool_nd(x: torch.Tensor, k: int) -> torch.Tensor:
     return x
 
 
-# ---------- 掩码构造/组合/度量 ----------
+# ---------- Mask Construction/Combination/Metrics ----------
 
 def apply_mask_blend(new: torch.Tensor, old: torch.Tensor, soft_mask: Optional[torch.Tensor]) -> torch.Tensor:
     """
-    用软掩码在空间上做凸组合：soft*new + (1-soft)*old。
-    如果 soft_mask 为 None，直接返回 new。
+    Convex combination using soft mask in spatial domain: soft*new + (1-soft)*old.
+    If soft_mask is None, returns new directly.
     """
     if soft_mask is None:
         return new
@@ -509,11 +509,11 @@ def combine_masks(
     w: float = 0.5
 ) -> Optional[torch.Tensor]:
     """
-    组合手动与自动掩码：
+    Combine manual and auto masks:
       - "union":   A ∪ B  ≈ A + B - A*B
       - "intersect": A ∩ B = A*B
       - "blend":   (1-w)*manual + w*auto
-    任一为 None 则返回另一个；两者皆 None 返回 None。
+    If either is None, returns the other; if both None, returns None.
     """
     if manual_soft is None and auto_soft is None:
         return None
@@ -536,17 +536,17 @@ def build_soft_masks(
     guard: int = 1
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
-    从二值/软 mask 生成：
-      - soft: 羽化后的软掩码（[0,1]）
-      - guard_band: 保护带（膨胀 - 原 mask），[0,1]
+    From binary/soft mask, generate:
+      - soft: feathered soft mask ([0,1])
+      - guard_band: guard band (dilation - original mask), [0,1]
     """
     if mask is None:
         return None, None
     m = _align_spatial(mask.float(), ref)
-    # 羽化
+    # Feathering
     soft = _avg_pool_nd(m, 2 * feather + 1) if feather > 0 else m
     soft = soft.clamp(0, 1)
-    # 保护带
+    # Guard band
     if guard > 0:
         dil = _max_pool_nd(m, 2 * guard + 1)
         guard_band = (dil - m).clamp(0, 1)
@@ -557,7 +557,7 @@ def build_soft_masks(
 
 def make_soft_mask(m: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     """
-    兼容老逻辑的简易软掩码（轻度均值滤波）。
+    Simple soft mask compatible with legacy logic (light average filtering).
     """
     if m is None:
         return None
@@ -570,7 +570,7 @@ def make_soft_mask(m: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
 
 
 def binarize(x: torch.Tensor, thr: float = 0.5) -> torch.Tensor:
-    """将软掩码二值化到 {0,1}。"""
+    """Binarize soft mask to {0,1}."""
     return (x >= thr).float()
 
 
@@ -581,8 +581,8 @@ def mask_metrics(
     eps: float = 1e-6
 ) -> Optional[dict]:
     """
-    计算 auto vs manual 的 IoU/Precision/Recall（在 thr 处二值化）。
-    输入可以是 2D/3D/Batched 张量，自动求和。
+    Compute IoU/Precision/Recall of auto vs manual (binarized at thr).
+    Input can be 2D/3D/Batched tensors, automatically summed.
     """
     if auto_soft is None or manual_soft is None:
         return None
@@ -596,28 +596,28 @@ def mask_metrics(
     return {"iou": iou.item(), "prec": prec.item(), "rec": rec.item()}
 
 
-# ---------- Auto-mask 构建与打分 ----------
+# ---------- Auto-mask Construction & Scoring ----------
 
 def reduce_vector_norm(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """
-    (B,C,[D,]H,W) -> (B,1,[D,]H,W)，L2 范数。
+    (B,C,[D,]H,W) -> (B,1,[D,]H,W), L2 norm.
     """
     return (x.pow(2).sum(dim=1, keepdim=True) + eps).sqrt()
 
 
 def build_auto_mask_from_map(
     score_map: torch.Tensor,
-    ref: Optional[torch.Tensor] = None,  # 兼容保留，不使用
+    ref: Optional[torch.Tensor] = None,  # Kept for compatibility, not used
     quantile: float = 0.7,
     tau: float = 0.25,
     feather: int = 2
 ) -> torch.Tensor:
     """
-    由打分图（越大越该编辑）生成软掩码：
-      - per-sample 分位阈值
-      - 温度 sigmoid
-      - 轻度羽化
-    返回值范围 [0,1]。
+    Generate soft mask from score map (higher = more likely to edit):
+      - per-sample quantile threshold
+      - temperature sigmoid
+      - light feathering
+    Returns values in range [0,1].
     """
     s = score_map
     B = s.size(0)
@@ -631,15 +631,15 @@ def build_auto_mask_from_map(
     return soft.clamp(0, 1)
 
 
-# ---------- 可视化（np 归一化 + 2x2 grid） ----------
+# ---------- Visualization (np normalization + 2x2 grid) ----------
 
 def _to_np_2d(x: ArrayLike) -> np.ndarray:
     """
-    将 torch / numpy 数据转为 (H,W) 的 numpy.float32，并归一化到 [0,1]。
-    规则：
-      - 若带 batch：取第一个样本
-      - 若为 (C,D,H,W)：取 ch0 + D 的中间切片
-      - 若为 (C,H,W) 或 (1,H,W)：取 ch0
+    Convert torch / numpy data to (H,W) numpy.float32, normalized to [0,1].
+    Rules:
+      - If batched: take first sample
+      - If (C,D,H,W): take ch0 + middle slice of D
+      - If (C,H,W) or (1,H,W): take ch0
     """
     if isinstance(x, torch.Tensor):
         a = x.detach().float().cpu().numpy()
@@ -666,7 +666,7 @@ def _save_panel_png(arr2d, path_png):
         if HAS_PIL:
             Image.fromarray((arr2d*255).astype(np.uint8), mode="L").convert("RGB").save(path_png)
         else:
-            # 无 PIL 时退化为 .npy
+            # Fallback to .npy when PIL is not available
             np.save(path_png.replace(".png", ".npy"), arr2d)
 
 
@@ -678,9 +678,9 @@ def _save_grid_2x2(
     out_png: str
 ) -> Optional[str]:
     """
-    将四个灰度面板（归一化到 [0,1] 的 2D numpy）拼成 2x2 大图保存。
-    若无 PIL，返回 None。
-    面板顺序：
+    Combine four grayscale panels (normalized to [0,1] 2D numpy) into a 2x2 grid image and save.
+    Returns None if PIL is not available.
+    Panel order:
       [auto, manual]
       [edited_mask, delta]
     """
@@ -711,16 +711,16 @@ def _save_grid_2x2(
 
 
 __all__ = [
-    # 形状/池化
+    # Shape/pooling
     "_align_spatial", "_avg_pool_nd", "_max_pool_nd",
-    # 掩码与融合
+    # Mask and blending
     "apply_mask_blend", "combine_masks", "build_soft_masks", "make_soft_mask",
     "binarize", "mask_metrics",
     # auto-mask
     "reduce_vector_norm", "build_auto_mask_from_map",
-    # 可视化
+    # Visualization
     "_to_np_2d", "_save_grid_2x2",
-    # 标志
+    # Flags
     "HAS_PIL",
 ]
 
@@ -733,16 +733,16 @@ def build_coord_index_map(sample_coords, ori_coords, mask):
     """
     sample_coords: [N, 3] int tensor
     ori_coords: [M, 3] int tensor
-    mask: [N] uint8 or bool tensor, 0 表示要替换
-    返回：
-        sample_indices: 需要替换的 sample 中的 index
-        ori_indices: 对应 ori_sample 中的 index
+    mask: [N] uint8 or bool tensor, 0 means to be replaced
+    Returns:
+        sample_indices: indices in sample that need replacement
+        ori_indices: corresponding indices in ori_sample
     """
-    # 先找出 sample 中需要替换的 coords
+    # Find coords in sample that need replacement
     target_indices = torch.nonzero(mask == 0, as_tuple=False).squeeze(1)
     target_coords = sample_coords[target_indices]  # [K, 3]
 
-    # 用 hash 表加速匹配
+    # Use hash table for fast matching
     ori_map = {tuple(c.tolist()): i for i, c in enumerate(ori_coords)}
     matched_sample_idx = []
     matched_ori_idx = []
@@ -767,20 +767,20 @@ import torch.nn.functional as F
 
 def weight_ring1_from_rawmask(coords: torch.Tensor, raw_mask: torch.Tensor, alpha: float = 0.5) -> torch.Tensor:
     """
-    用 raw_mask（[B,1,64,64,64]）计算每个坐标的融合权重：
-      - 掩码内：w=1
-      - 掩码外且到掩码的 L∞ 距离==1（外侧一圈）：w=alpha
-      - 其他：w=0
-    坐标格式 (b,x,y,z)，与 grid[b,0,x,y,z] 对齐。
+    Compute per-coordinate blending weight from raw_mask ([B,1,64,64,64]):
+      - Inside mask: w=1
+      - Outside mask with L∞ distance==1 (one-ring outside): w=alpha
+      - Otherwise: w=0
+    Coordinate format (b,x,y,z), aligned with grid[b,0,x,y,z].
     """
     grid = raw_mask.to(coords.device)
-    if grid.dtype != torch.bool:  # 0/1 浮点转 bool
+    if grid.dtype != torch.bool:  # Convert 0/1 float to bool
         grid = grid > 0
 
-    # 形态学膨胀实现 L∞-1 邻域：max_pool3d kernel=3, padding=1
-    # 注意：必须在 float 上做池化，再阈值回 bool
+    # Morphological dilation for L∞-1 neighborhood: max_pool3d kernel=3, padding=1
+    # Note: pooling must be done on float, then threshold back to bool
     dilated = F.max_pool3d(grid.float(), kernel_size=3, stride=1, padding=1) > 0.5
-    ring = (~grid) & dilated  # 外侧一圈
+    ring = (~grid) & dilated  # One-ring outside
 
     b, x, y, z = coords.long().unbind(dim=1)  # (b,x,y,z)
     inside = grid[b, 0, x, y, z]
@@ -794,26 +794,26 @@ def weight_ring1_from_rawmask(coords: torch.Tensor, raw_mask: torch.Tensor, alph
 
 def blend_feats_ring1_outside_rawmask(sample, ori_sample, raw_mask: torch.Tensor, alpha=0.5):
     """
-    raw_mask 版融合：
-      - 掩码内：用 sample 新特征
-      - 掩码外一圈（L∞=1）：新旧按 alpha 融合
-      - 掩码外远处：保留 ori
-      - 对“新增坐标”（ori 没有的）强制新（w=1）
+    raw_mask version blending:
+      - Inside mask: use sample's new features
+      - One-ring outside mask (L∞=1): blend new/old by alpha
+      - Far outside mask: keep ori
+      - For "new coordinates" (not in ori): force new (w=1)
     """
     device = sample.feats.device
     coords     = sample.coords.to(device)      # [Ns,4] (b,x,y,z)
     coords_ori = ori_sample.coords.to(device)  # [No,4]
 
-    # 计算权重
+    # Compute weights
     w = weight_ring1_from_rawmask(coords, raw_mask.to(device), alpha=alpha)  # [Ns]
 
-    # 新增坐标：强制 w=1
-    # 这里假设你已有 _hash4(c) -> int64 的哈希函数（与你现有代码一致）
+    # New coordinates: force w=1
+    # Assumes _hash4(c) -> int64 hash function exists (consistent with existing code)
     is_new = ~torch.isin(_hash4(coords), _hash4(coords_ori))
     w = torch.where(is_new, torch.ones_like(w), w)
 
-    # 找出新旧坐标的重叠行，用于融合
-    # 保持你原先的 dict 查找方式，简单稳妥
+    # Find overlapping rows between new and old coords for blending
+    # Keep the dict lookup approach, simple and reliable
     ori_map = {tuple(c.tolist()): i for i, c in enumerate(coords_ori)}
     idx_s, idx_o = [], []
     for i, c in enumerate(coords):
@@ -822,12 +822,12 @@ def blend_feats_ring1_outside_rawmask(sample, ori_sample, raw_mask: torch.Tensor
             idx_s.append(i); idx_o.append(j)
 
     if not idx_s:
-        return sample  # 无重叠，直接返回
+        return sample  # No overlap, return directly
 
     idx_s = torch.tensor(idx_s, dtype=torch.long, device=device)
     idx_o = torch.tensor(idx_o, dtype=torch.long, device=device)
 
-    # 融合：new = w*new + (1-w)*old
+    # Blend: new = w*new + (1-w)*old
     new_feats = sample.feats.clone()
     w_exp = w[idx_s].unsqueeze(1).to(new_feats.dtype)  # [K,1]
     new_feats[idx_s] = w_exp * new_feats[idx_s] + (1 - w_exp) * ori_sample.feats[idx_o].to(new_feats.dtype)
@@ -836,10 +836,10 @@ def blend_feats_ring1_outside_rawmask(sample, ori_sample, raw_mask: torch.Tensor
 
 def _normalize_boxes_zyx(mask_list):
     """
-    将 mask_list 统一为“多个盒子”的列表，且顺序固定为 [z,y,x]。
-      - 单盒子: [[z0,z1],[y0,y1],[x0,x1]] -> [ [[z0,z1],[y0,y1],[x0,x1]] ]
-      - 多盒子: [[[z0,z1],[y0,y1],[x0,x1]], ...] -> 原样
-    做基本 clamp 到 [0, 64]，但不改变“闭区间”的语义（仍然 <=）。
+    Normalize mask_list to a list of "multiple boxes", with fixed order [z,y,x].
+      - Single box: [[z0,z1],[y0,y1],[x0,x1]] -> [ [[z0,z1],[y0,y1],[x0,x1]] ]
+      - Multiple boxes: [[[z0,z1],[y0,y1],[x0,x1]], ...] -> as-is
+    Performs basic clamp to [0, 64], but does not change "closed interval" semantics (still <=).
     """
     if mask_list is None:
         return []
@@ -850,7 +850,7 @@ def _normalize_boxes_zyx(mask_list):
         except Exception:
             mask_list = ast.literal_eval(mask_list)
 
-    # 单盒子 -> 多盒子
+    # Single box -> multiple boxes
     if len(mask_list) == 3 and all(isinstance(v, (list, tuple)) for v in mask_list):
         boxes = [mask_list]
     else:
@@ -871,13 +871,13 @@ def _normalize_boxes_zyx(mask_list):
         y0, y1 = clamp_pair(y0, y1)
         x0, x1 = clamp_pair(x0, x1)
 
-        # 允许 z1==64 这种上界，因你用 <= 判断，coords 最大 63 时也不会越界
+        # Allow z1==64 as upper bound; since <= is used for comparison, coords max 63 won't overflow
         if (z1 >= z0) and (y1 >= y0) and (x1 >= x0):
             out.append([[z0, z1], [y0, y1], [x0, x1]])
     return out
 
 def inside_any_zyx_mask(t: torch.Tensor, boxes_zyx):
-    """返回布尔向量：点是否落在任一 [z,y,x] 盒子内（闭区间）。"""
+    """Return boolean vector: whether each point falls inside any [z,y,x] box (closed interval)."""
     if not boxes_zyx:
         return torch.zeros(t.size(0), dtype=torch.bool, device=t.device)
     x, y, z = t[:,1], t[:,2], t[:,3]
@@ -889,7 +889,7 @@ def inside_any_zyx_mask(t: torch.Tensor, boxes_zyx):
     return mask
 
 def filter_coords_by_boxes_zyx(t: torch.Tensor, boxes_zyx, keep: str):
-    """keep='inside' 或 'outside'。返回筛选后的 coords（保持 dtype/shape）。"""
+    """keep='inside' or 'outside'. Returns filtered coords (preserving dtype/shape)."""
     m = inside_any_zyx_mask(t, boxes_zyx)
     return t[m] if keep == 'inside' else t[~m]
 
@@ -898,11 +898,11 @@ import torch
 def merge_coords(
     coords1: torch.Tensor,   # [N1, 4] (b,x,y,z)
     coords:  torch.Tensor,   # [N2, 4] (b,x,y,z)
-    raw_mask: torch.Tensor,  # [B,1,64,64,64]，bool 或 数值>0
-    device=None,             # 兼容旧签名（忽略）
-    hole_fill_radius: int = 0  # 兼容旧签名（忽略）
+    raw_mask: torch.Tensor,  # [B,1,64,64,64], bool or values>0
+    device=None,             # Kept for legacy signature (ignored)
+    hole_fill_radius: int = 0  # Kept for legacy signature (ignored)
 ) -> torch.Tensor:
-    # 保证 dtype/设备一致（不下CPU）
+    # Ensure dtype/device consistency (stay on GPU)
     grid   = raw_mask.to(coords.device)
     if grid.dtype != torch.bool:
         grid = grid > 0
@@ -910,14 +910,14 @@ def merge_coords(
     coords1 = coords1.to(dtype=torch.long, device=coords.device)
     coords  = coords.to(dtype=torch.long, device=coords.device)
 
-    # inside 判定：grid[b,0,x,y,z]
+    # Inside check: grid[b,0,x,y,z]
     b1, x1, y1, z1 = coords1.unbind(dim=1)
     b0, x0, y0, z0 = coords.unbind(dim=1)
 
     inside1 = grid[b1, 0, x1, y1, z1]
     inside0 = grid[b0, 0, x0, y0, z0]
 
-    # 掩码内用新 coords1，掩码外保留旧 coords
+    # Use new coords1 inside mask, keep old coords outside mask
     out = torch.cat([coords1[inside1], coords[~inside0]], dim=0)
     out = torch.unique(out, dim=0).to(torch.int32).contiguous()
     return out
@@ -925,8 +925,8 @@ def merge_coords(
 
 def read_feature(feature_path, img_name):
     """
-    从 feature_path（如 features.pkl）中读取指定 img_name 对应的 tensor。
-    如果未找到该 img_name，返回 None。
+    Read the tensor corresponding to img_name from feature_path (e.g., features.pkl).
+    Returns None if img_name is not found.
     """
     with open(feature_path, 'rb') as f:
         while True:
@@ -942,32 +942,32 @@ def read_feature(feature_path, img_name):
                         return data
             except EOFError:
                 break
-    return None  # 没找到
+    return None  # Not found
 
 
 def load_img_features(feature_path):
     img_feature_dict = {}
 
-    # 以 rb 模式打开文件
+    # Open file in rb mode
     with open(feature_path, 'rb') as f:
         os.makedirs(os.path.dirname(feature_path), exist_ok=True)
         while True:
             try:
-                # 加载一个字典
+                # Load one dictionary
                 feature_item = pickle.load(f)
                 for key, value in feature_item.items():
                     if key.endswith('_img'):
                         img_feature_dict[key] = value
             except EOFError:
-                break  # 读取完毕退出循环
+                break  # Finished reading, exit loop
 
     return img_feature_dict
 
 def save_feature(feature_path, img_name, sample):
-    # 确保目录存在
+    # Ensure directory exists
     os.makedirs(os.path.dirname(feature_path), exist_ok=True)
 
-    # 确保 sample 在 CPU 上
+    # Ensure sample is on CPU
     if isinstance(sample, torch.Tensor):
         sample_cpu = sample.detach().cpu()
         feature_item = {img_name: sample_cpu}
@@ -982,7 +982,7 @@ def save_feature(feature_path, img_name, sample):
     else:
         raise ValueError(f"[ERROR] Unsupported sample type: {type(sample)}")
 
-    # 以追加方式写入 pickle 文件
+    # Write to pickle file in append mode
     with open(feature_path, 'ab') as f:
         pickle.dump(feature_item, f)
 
@@ -1183,83 +1183,83 @@ def indent(s, n=4):
 
 def quantize_colors(continuous_colors: np.ndarray, n_intervals: int = 20) -> np.ndarray:
     """
-    辅助函数：将 [0, 255] 范围内的连续颜色值量化为 n_intervals 个离散值。
+    Helper function: quantize continuous color values in [0, 255] range to n_intervals discrete values.
     
-    它将每个值映射到其所属区间的*中点*。
+    It maps each value to the *midpoint* of its corresponding interval.
     """
     if n_intervals <= 0:
         return continuous_colors.astype(np.uint8)
 
-    print(f"  > 正在执行量化，n_intervals={n_intervals}...")
+    print(f"  > Performing quantization, n_intervals={n_intervals}...")
 
-    # 1. 确保值在 [0, 255] 范围内
-    # (np.uint8 会自动截断，但为了计算准确，我们先手动 clip)
+    # 1. Ensure values are in [0, 255] range
+    # (np.uint8 auto-truncates, but we manually clip for accuracy)
     clipped_colors = np.clip(continuous_colors, 0, 255)
     
-    # 2. 定义区间的属性
-    # 我们使用 256.0 来进行浮点数除法，确保 20 个区间均匀覆盖 0-255
+    # 2. Define interval properties
+    # Use 256.0 for float division, ensuring n_intervals evenly cover 0-255
     interval_width = 256.0 / n_intervals 
-    # (例如, 256.0 / 20 = 12.8)
+    # (e.g., 256.0 / 20 = 12.8)
     
-    # 区间的中点偏移量
+    # Midpoint offset of each interval
     midpoint_offset = interval_width / 2.0
-    # (例如, 12.8 / 2.0 = 6.4)
+    # (e.g., 12.8 / 2.0 = 6.4)
 
-    # 3. 应用量化公式
-    # 核心逻辑:
-    # 1. (clipped_colors / interval_width) -> 找出值在哪个区间 (例如 20.0 / 12.8 = 1.56)
-    # 2. np.floor(...) -> 取整, 得到区间索引 (例如 floor(1.56) = 1.0)
-    # 3. (... * interval_width) -> 移动到该区间的起始点 (例如 1.0 * 12.8 = 12.8)
-    # 4. (... + midpoint_offset) -> 移动到该区间的中点 (例如 12.8 + 6.4 = 19.2)
+    # 3. Apply quantization formula
+    # Core logic:
+    # 1. (clipped_colors / interval_width) -> find which interval the value belongs to (e.g., 20.0 / 12.8 = 1.56)
+    # 2. np.floor(...) -> truncate to get interval index (e.g., floor(1.56) = 1.0)
+    # 3. (... * interval_width) -> move to interval start (e.g., 1.0 * 12.8 = 12.8)
+    # 4. (... + midpoint_offset) -> move to interval midpoint (e.g., 12.8 + 6.4 = 19.2)
     
     quantized_values = (np.floor(clipped_colors / interval_width) * interval_width) + midpoint_offset
     
-    # 4. 转换回 uint8
+    # 4. Convert back to uint8
     return quantized_values.astype(np.uint8)
 
 
 def features_to_rgba(features: torch.Tensor) -> np.ndarray:
     """
-    辅助函数：将 [N, C] 特征张量转换为 [N, 4] RGBA 颜色 (0-255)。
+    Helper function: convert [N, C] feature tensor to [N, 4] RGBA colors (0-255).
     
-    (已修改：当 C > 3 时使用 PCA 降维)
-    (已修改：在末尾添加 20 区间量化)
+    (Modified: uses PCA for dimensionality reduction when C > 3)
+    (Modified: adds 20-interval quantization at the end)
     """
-    print(f"开始计算 {features.shape[0]} 个特征的颜色...")
+    print(f"Computing colors for {features.shape[0]} features...")
     
     if features.is_cuda:
         features = features.cpu()
     feat_np = features.numpy()
     N, C = feat_np.shape
     
-    # --- 约束：透明度始终为 255 ---
+    # --- Constraint: alpha is always 255 ---
     alpha = np.full((N, 1), 255, dtype=np.uint8)
     
-    # 默认 RGB (灰色)
+    # Default RGB (gray)
     rgb_colors = np.full((N, 3), 200, dtype=np.uint8) 
 
     try:
         if C == 1:
-            # (逻辑不变: 1D 特征使用热力图)
-            print("特征 C=1, 应用热力图...")
+            # (Unchanged: 1D features use heatmap)
+            print("Feature C=1, applying heatmap...")
             norm_feat = (feat_np - feat_np.min()) / (feat_np.max() - feat_np.min() + 1e-6)
             cmap = plt.get_cmap('viridis')
             rgba_colors_01 = cmap(norm_feat.squeeze())
-            # (这里得到的是 0-255 的 *连续* 浮点数)
+            # (These are *continuous* float values in 0-255)
             rgb_colors = (rgba_colors_01[:, :3] * 255)
             
         elif C == 3:
-            # (逻辑不变: 3D 特征直接归一化为 RGB)
-            print("特征 C=3, 归一化为 RGB...")
+            # (Unchanged: 3D features directly normalized to RGB)
+            print("Feature C=3, normalizing to RGB...")
             min_vals = feat_np.min(axis=0)
             max_vals = feat_np.max(axis=0)
             range_vals = max_vals - min_vals + 1e-6
-            # (这里得到的是 0-255 的 *连续* 浮点数)
+            # (These are *continuous* float values in 0-255)
             rgb_colors = ((feat_np - min_vals) / range_vals * 255)
             
         elif C > 3:
-            # --- *修改后的 PCA 逻辑* ---
-            print(f"特征 C={C}, 使用 PCA 降维至 3 通道进行着色。")
+            # --- *Modified PCA logic* ---
+            print(f"Feature C={C}, using PCA to reduce to 3 channels for coloring.")
             
             pca = PCA(n_components=3)
             rgb_features = pca.fit_transform(feat_np)
@@ -1267,24 +1267,24 @@ def features_to_rgba(features: torch.Tensor) -> np.ndarray:
             min_vals = rgb_features.min(axis=0)
             max_vals = rgb_features.max(axis=0)
             range_vals = max_vals - min_vals + 1e-6
-            # (这里得到的是 0-255 的 *连续* 浮点数)
+            # (These are *continuous* float values in 0-255)
             rgb_colors = ((rgb_features - min_vals) / range_vals * 255)
             
         else: # C == 0 or C == 2
-            print(f"警告：特征维度 {C} 不支持。使用默认灰色。")
+            print(f"Warning: feature dimension {C} not supported. Using default gray.")
             
     except Exception as e:
-        print(f"颜色映射时发生错误: {e}。将使用默认灰色。")
-        # 即使出错，也使用默认的 rgb_colors (全 200)
+        print(f"Error during color mapping: {e}. Using default gray.")
+        # Even on error, use default rgb_colors (all 200)
 
-    # --- 4. (新步骤) 量化 RGB 颜色 ---
-    # 无论 try/except 走哪个分支 (C=1, C=3, C>3 或 except)，
-    # 都在这里对 rgb_colors (此时还是连续值) 进行量化。
+    # --- 4. (New step) Quantize RGB colors ---
+    # Regardless of which branch in try/except (C=1, C=3, C>3 or except),
+    # quantize rgb_colors (still continuous values at this point) here.
     
-    print(f"将 RGB 颜色量化为 {5} 个区间...")
+    print(f"Quantizing RGB colors to {5} intervals...")
     rgb_colors = quantize_colors(rgb_colors, n_intervals=5)
     
-    # 5. 组合 R, G, B 和 Alpha
+    # 5. Combine R, G, B and Alpha
     return np.hstack((rgb_colors, alpha))
 
 
@@ -1296,15 +1296,15 @@ def export_indexed_coords_to_glb_cubes_colored(
     slat_feat: torch.Tensor = None,
 ):
     """
-    (V3 - 健壮版)
-    将 (b,x,y,z) 索引坐标转换为 [0, 1] 空间中的 *带颜色* 的方块网格。
+    (V3 - Robust version)
+    Convert (b,x,y,z) indexed coordinates to *colored* cube grid in [0, 1] space.
     
-    统一使用 "先合并几何，后整体上色" 的可靠方法。
+    Uses the reliable approach of "merge geometry first, then color all at once".
     """
     
-    print(f"开始导出至 {output_filename}......")
+    print(f"Starting export to {output_filename}...")
 
-    # --- 1. 提取 (x,y,z) 索引 ---
+    # --- 1. Extract (x,y,z) indices ---
     if out_coords.is_cuda:
         out_coords_cpu = out_coords.cpu()
     else:
@@ -1314,76 +1314,76 @@ def export_indexed_coords_to_glb_cubes_colored(
     N = xyz_indices_np.shape[0]
     
     if N == 0:
-        print("错误：没有任何坐标可供导出。")
+        print("Error: no coordinates to export.")
         return
 
-    print(f"找到 {N} 个体素... 正在计算缩放...")
+    print(f"Found {N} voxels... computing scaling...")
 
-    # --- 2. 计算缩放、位置 ---
+    # --- 2. Compute scaling and positions ---
     
     voxel_size = 1.0 / float(grid_size)
     
-    # 创建一个 *基础* 方块 (无色)
+    # Create a *base* cube (no color)
     base_cube = trimesh.creation.box(extents=[voxel_size, voxel_size, voxel_size])
-    num_vertices_per_cube = len(base_cube.vertices) # 应该是 8
+    num_vertices_per_cube = len(base_cube.vertices) # Should be 8
     
-    # 计算世界坐标中心
+    # Compute world coordinate centers
     world_centers_np = (xyz_indices_np - 0.5) * voxel_size
 
-    # --- 3. 实例化与合并 (只合并几何) ---
+    # --- 3. Instantiation & Merging (geometry only) ---
     
-    # 1. 先实例化 *无色* 的方块 (速度快)
-    print("正在实例化所有方块 (无色)...")
+    # 1. Instantiate *uncolored* cubes (fast)
+    print("Instantiating all cubes (uncolored)...")
     all_cubes = [base_cube.copy().apply_translation(p) for p in world_centers_np]
     
-    # 2. 合并它们
-    print("正在合并所有方块...")
+    # 2. Merge them
+    print("Merging all cubes...")
     final_mesh = trimesh.util.concatenate(all_cubes)
     
-    # --- 4. 准备 *巨大* 的颜色数组 ---
+    # --- 4. Prepare *large* color array ---
     
     total_vertices = final_mesh.vertices.shape[0]
-    # 检查：total_vertices 应该等于 N * num_vertices_per_cube
+    # Check: total_vertices should equal N * num_vertices_per_cube
     if total_vertices != N * num_vertices_per_cube:
-        print(f"警告：顶点数不匹配！{total_vertices} != {N} * {num_vertices_per_cube}")
-        # 即使不匹配，也尝试继续
+        print(f"Warning: vertex count mismatch! {total_vertices} != {N} * {num_vertices_per_cube}")
+        # Try to continue even if mismatch
         
     if slat_feat is None:
-        # *********** 目标 1: 统一颜色 ***********
-        print(f"正在构建统一颜色数组: {color_rgba}")
+        # *********** Goal 1: Uniform color ***********
+        print(f"Building uniform color array: {color_rgba}")
         
-        # 创建一个巨大的列表 (或 Numpy 数组)
+        # Create a large list (or Numpy array)
         vertex_colors = np.array([color_rgba] * total_vertices, dtype=np.uint8)
         
     else:
-        # *********** 目标 2: 根据特征分别着色 ***********
-        print("正在构建特征颜色数组...")
+        # *********** Goal 2: Color by features ***********
+        print("Building feature color array...")
         if slat_feat.shape[0] != N:
-            print(f"错误: 坐标数 ({N}) 与特征数 ({slat_feat.shape[0]}) 不匹配。")
+            print(f"Error: coordinate count ({N}) does not match feature count ({slat_feat.shape[0]}).")
             return
             
-        # 1. 计算 N 个体素的 N 个颜色 (shape: [N, 4])
+        # 1. Compute N colors for N voxels (shape: [N, 4])
         voxel_colors_np = features_to_rgba(slat_feat) 
         
-        # 2. *关键*: 将每个体素颜色重复 N_vert 次 (8次)
-        # np.repeat 会按顺序复制，正好对应 concatenate 的顶点顺序
-        # [C1, C2, C3] -> [C1,C1... (8次), C2,C2... (8次), C3,C3... (8次)]
-        print(f"正在将 {N} 个体素颜色扩展到 {total_vertices} 个顶点...")
+        # 2. *Key*: repeat each voxel color N_vert times (8 times)
+        # np.repeat copies in order, matching the vertex order from concatenate
+        # [C1, C2, C3] -> [C1,C1... (8x), C2,C2... (8x), C3,C3... (8x)]
+        print(f"Expanding {N} voxel colors to {total_vertices} vertices...")
         vertex_colors = np.repeat(voxel_colors_np, num_vertices_per_cube, axis=0)
 
-        # 再次检查形状
+        # Check shape again
         if vertex_colors.shape[0] != total_vertices:
-            print(f"错误：最终颜色数组形状 {vertex_colors.shape} 与顶点数 {total_vertices} 不匹配。")
-            # 尝试调整大小（这只是一个保险措施）
+            print(f"Error: final color array shape {vertex_colors.shape} does not match vertex count {total_vertices}.")
+            # Try to resize (this is just a safety measure)
             vertex_colors = np.resize(vertex_colors, (total_vertices, 4))
 
 
-    # --- 5. *一次性*应用颜色并导出 ---
-    print("正在为合并后的网格指定颜色...")
+    # --- 5. Apply colors *all at once* and export ---
+    print("Assigning colors to merged mesh...")
     
-    # *最终赋值*
+    # *Final assignment*
     final_mesh.visual.vertex_colors = vertex_colors
     
-    print(f"正在导出至 {output_filename}...")
+    print(f"Exporting to {output_filename}...")
     final_mesh.export(output_filename)
-    print(f"导出 {output_filename} 完成。")
+    print(f"Export of {output_filename} complete.")

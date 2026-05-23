@@ -185,7 +185,7 @@ class FlowMatchingTrainer(BasicTrainer):
         x_t = self.diffuse(x_A, t, noise=noise)
 
         cond_in = self.get_cond(cond, **kwargs)
-        # 也可以拼上 x_A 作为 condition:
+        # Can also concatenate x_A as condition:
         cond_in = torch.cat([cond_in, x_A], dim=1)
 
         pred = self.training_models['denoiser'](x_t, t * 1000, cond_in, **kwargs)

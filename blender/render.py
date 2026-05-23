@@ -28,7 +28,7 @@ import numpy as np  # noqa: E402
 
 
 # ============================================================================
-# 1. 通用常量 / 通用工具函数
+# 1. Common Constants / Utility Functions
 # ============================================================================
 
 IMPORT_FUNCTIONS: Dict[str, Callable] = {
@@ -224,7 +224,7 @@ def export_glb(filepath: str) -> None:
 
 
 # ============================================================================
-# 2. 渲染引擎 / 相机 / 灯光 / compositor 节点树
+# 2. Render Engine / Camera / Light / Compositor Node Tree
 # ============================================================================
 
 def init_render_engine(engine: str, resolution: int, geo_mode: bool = False,
@@ -303,7 +303,8 @@ def build_normal_compositor(output_base: str):
     Returns the file-output node, caller sets file_slots[0].path per view.
     """
     scene = bpy.context.scene
-    # 用当前激活的 view_layer，避免不同 Blender 版本/语言下默认名不是 "View Layer"
+    # Use the currently active view_layer to avoid issues where the default name
+    # is not "View Layer" across different Blender versions/languages
     view_layer = bpy.context.view_layer if bpy.context.view_layer is not None else scene.view_layers[0]
     view_layer.use_pass_normal = True
     view_layer.use_pass_z = True
@@ -333,7 +334,7 @@ def build_normal_compositor(output_base: str):
 
 
 # ============================================================================
-# 3. 相机运动 / 相机内外参
+# 3. Camera Motion / Camera Intrinsics & Extrinsics
 # ============================================================================
 
 def set_camera_mvdream(azimuth_deg: float, elevation_deg: float, distance: float) -> bpy.types.Object:
@@ -396,7 +397,7 @@ def get_RT_3x4(cam) -> np.ndarray:
 
 
 # ============================================================================
-# 4. 五种 Task 的具体实现
+# 4. Task Implementations
 # ============================================================================
 
 def _common_init_and_load(args):
@@ -484,14 +485,14 @@ def _ortho_render_loop(args, do_normalize: bool, image_subdir: str,
     if save_camera_npy:
         os.makedirs(os.path.join(args.output_folder, "camera"), exist_ok=True)
 
-    # 1) 先把渲染引擎设成 CYCLES + GPU（和 task_views 保持一致），
-    #    否则默认引擎可能触发 GL / EGL 路径导致 headless 崩溃。
+    # 1) Set render engine to CYCLES + GPU (consistent with task_views),
+    #    otherwise the default engine may trigger GL/EGL path causing headless crash.
     init_render_engine(args.engine, args.resolution)
 
-    # 2) 清场景（此时默认 Camera/Light 也一并清掉，避免残留状态）
+    # 2) Reset scene (also removes default Camera/Light to avoid residual state)
     reset_scene(keep_camera_light=False)
 
-    # 3) 导入模型 + 环境光
+    # 3) Import model + environment light
     load_object(args.object)
     init_environment_light()
 
@@ -500,13 +501,13 @@ def _ortho_render_loop(args, do_normalize: bool, image_subdir: str,
     except Exception as e:
         print(f"[WARN] strip_bsdf_normal_links failed: {e}")
 
-    # 4) 归一化（先于相机创建，保证 empty/相机位置对齐归一化后的坐标系）
+    # 4) Normalize (before camera creation to ensure empty/camera aligns with normalized coordinate system)
     scale_offset = None
     if do_normalize:
         scale, offset = normalize_scene(shrink=1.0, unparent_camera=False)
         scale_offset = (scale, offset)
 
-    # 5) 现在再创建正交相机（此时场景里一定没有老 "Camera"，新建一个干净的）
+    # 5) Now create orthographic camera (scene has no old "Camera" at this point, create a clean one)
     cam_data = bpy.data.cameras.new("Camera")
     cam = bpy.data.objects.new("Camera", cam_data)
     bpy.context.collection.objects.link(cam)
@@ -596,7 +597,7 @@ def task_ortho_ref(args):
     _ortho_render_loop(
         args, do_normalize=True,
         image_subdir="image_ori",
-        normal_subdir=None,   # 暂不渲染法线；后续需要时改回 "normal_ori"
+        normal_subdir=None,   # Normal rendering disabled; change back to "normal_ori" if needed
         save_camera_npy=True,
     )
 
@@ -606,7 +607,7 @@ def task_ortho_edit(args):
     _ortho_render_loop(
         args, do_normalize=False,
         image_subdir="image",
-        normal_subdir=None,   # 暂不渲染法线；后续需要时改回 "normal"
+        normal_subdir=None,   # Normal rendering disabled; change back to "normal" if needed
         save_camera_npy=False,
     )
 
@@ -645,18 +646,18 @@ def task_mask(args):
 
 
 # ============================================================================
-# 5. 命令行入口
+# 5. CLI Entry Point
 # ============================================================================
 
 def build_argparser():
     p = argparse.ArgumentParser(description="Unified Blender rendering script.")
     p.add_argument("--task", type=str, default="views",
                    choices=["views", "ortho_ref", "ortho_edit", "mask"],
-                   help="渲染任务类型")
+                   help="Rendering task type")
 
-    # 通用
-    p.add_argument("--object", type=str, required=True, help="主模型路径")
-    p.add_argument("--output_folder", type=str, required=True, help="输出目录")
+    # Common
+    p.add_argument("--object", type=str, required=True, help="Main model path")
+    p.add_argument("--output_folder", type=str, required=True, help="Output directory")
     p.add_argument("--resolution", type=int, default=512)
     p.add_argument("--engine", type=str, default="CYCLES",
                    choices=["CYCLES", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"])
@@ -664,18 +665,18 @@ def build_argparser():
     # --task views
     p.add_argument("--views", type=str, default="",
                    help="JSON string of views, each entry: {yaw,pitch,radius,fov}")
-    p.add_argument("--save_mesh", action="store_true", help="保存 mesh.ply（仅 --task views）")
+    p.add_argument("--save_mesh", action="store_true", help="Save mesh.ply (only for --task views)")
     p.add_argument("--export_normalized_glb", action="store_true",
-                   help="保存 normalized.glb（仅 --task views）")
+                   help="Save normalized.glb (only for --task views)")
     p.add_argument("--radius_scale", type=float, default=0.76)
     p.add_argument("--transform_path", type=str, default=None,
-                   help="若提供，从该 transforms.json 读 scale/offset 对 mask 做归一化（仅 --task views）")
+                   help="If provided, read scale/offset from this transforms.json to normalize mask (only for --task views)")
 
     # --task ortho_*
-    p.add_argument("--num_images", type=int, default=16, help="ortho 视角数（仅 ortho_* / mask）")
+    p.add_argument("--num_images", type=int, default=16, help="Number of ortho views (only for ortho_* / mask)")
 
     # --task mask
-    p.add_argument("--mask_path", type=str, default=None, help="mask 模型路径（仅 --task mask）")
+    p.add_argument("--mask_path", type=str, default=None, help="Mask model path (only for --task mask)")
 
     return p
 

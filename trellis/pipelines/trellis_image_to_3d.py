@@ -254,7 +254,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             ).samples
             decoder = self.models['sparse_structure_decoder']
             coords1 = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
-            #####可视化结果（默认关闭，成本：每步解码 + 4视角渲染，很慢）
+            #####Visualization results (disabled by default; cost: per-step decode + 4-view rendering, very slow)
             enable_step_viz = bool(kwargs.get("enable_step_viz", False))
             if enable_step_viz:
                 device = self.device
@@ -274,7 +274,7 @@ class TrellisImageTo3DPipeline(Pipeline):
                     voxel_tensor = torch.zeros((z_s.shape[0], 1, resolution, resolution, resolution), dtype=torch.float32, device=device)
 
                     for b in range(z_s.shape[0]):
-                        batch_coords = coords[coords[:, 0] == b][:, 1:]  # 取该 batch 的 voxel 坐标
+                        batch_coords = coords[coords[:, 0] == b][:, 1:]  # Get voxel coords for this batch
                         voxel_tensor[b, 0, batch_coords[:, 0], batch_coords[:, 1], batch_coords[:, 2]] = 1.0
 
                     images = self.visualize_sample(voxel_tensor)
@@ -289,12 +289,12 @@ class TrellisImageTo3DPipeline(Pipeline):
                 voxel_tensor = torch.zeros((z_s.shape[0], 1, resolution, resolution, resolution), dtype=torch.float32, device=device)
 
                 for b in range(z_s.shape[0]):
-                    batch_coords = coords[coords[:, 0] == b][:, 1:]  # 取该 batch 的 voxel 坐标
+                    batch_coords = coords[coords[:, 0] == b][:, 1:]  # Get voxel coords for this batch
                     voxel_tensor[b, 0, batch_coords[:, 0], batch_coords[:, 1], batch_coords[:, 2]] = 1.0
 
                 images = self.visualize_sample(voxel_tensor)
                 for idx, img in enumerate(images):
-            # 如果 batch 大于 1，保存为 k_0.png, k_1.png ...
+            # If batch > 1, save as k_0.png, k_1.png ...
                     name = f"mask.png" if z_s.shape[0] > 1 else f"mask.png"
                     vutils.save_image(img, os.path.join(save_dir, name))
             return coords1
@@ -332,13 +332,13 @@ class TrellisImageTo3DPipeline(Pipeline):
                     voxel_tensor = torch.zeros((z_s.shape[0], 1, resolution, resolution, resolution), dtype=torch.float32, device=device)
     
                     for b in range(z_s.shape[0]):
-                        batch_coords = coords[coords[:, 0] == b][:, 1:]  # 取该 batch 的 voxel 坐标
+                        batch_coords = coords[coords[:, 0] == b][:, 1:]  # Get voxel coords for this batch
                         voxel_tensor[b, 0, batch_coords[:, 0], batch_coords[:, 1], batch_coords[:, 2]] = 1.0
     
                     images = self.visualize_sample(voxel_tensor)
 
                     for idx, img in enumerate(images):
-        # 如果 batch 大于 1，保存为 k_0.png, k_1.png ...
+        # If batch > 1, save as k_0.png, k_1.png ...
                         name = f"{k}_{idx}.png" if z_s.shape[0] > 1 else f"{k}.png"
                         vutils.save_image(img, os.path.join(save_dir, name))
                 coords = torch.argwhere(kwargs["ori_mask"])[:, [0, 2, 3, 4]].int()  # [batch_idx, z, y, x]
@@ -350,13 +350,13 @@ class TrellisImageTo3DPipeline(Pipeline):
                 voxel_tensor = torch.zeros((z_s.shape[0], 1, resolution, resolution, resolution), dtype=torch.float32, device=device)
     
                 for b in range(z_s.shape[0]):
-                    batch_coords = coords[coords[:, 0] == b][:, 1:]  # 取该 batch 的 voxel 坐标
+                    batch_coords = coords[coords[:, 0] == b][:, 1:]  # Get voxel coords for this batch
                     voxel_tensor[b, 0, batch_coords[:, 0], batch_coords[:, 1], batch_coords[:, 2]] = 1.0
     
                 images = self.visualize_sample(voxel_tensor)
 
                 for idx, img in enumerate(images):
-        # 如果 batch 大于 1，保存为 k_0.png, k_1.png ...
+        # If batch > 1, save as k_0.png, k_1.png ...
                     name = f"mask.png" if z_s.shape[0] > 1 else f"mask.png"
                     vutils.save_image(img, os.path.join(save_dir, name))
             return coords1
@@ -401,9 +401,9 @@ class TrellisImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
 
         kwargs:
-            - mode: "baseline" | "repaint"。repaint 模式下使用 SLAT repainting 公式。
-            - latent_slat (SparseTensor, optional): repaint 模式下的源 SLAT（未归一化）。
-            - mask (Tensor, optional): repaint 模式下的 3D raw_mask [B,1,64,64,64]（1=可编辑区）。
+            - mode: "baseline" | "repaint". In repaint mode, uses SLAT repainting formula.
+            - latent_slat (SparseTensor, optional): Source SLAT (unnormalized) for repaint mode.
+            - mask (Tensor, optional): 3D raw_mask [B,1,64,64,64] for repaint mode (1=editable region).
         """
         # Sample structured latent
         flow_model = self.models['slat_flow_model']
@@ -415,24 +415,24 @@ class TrellisImageTo3DPipeline(Pipeline):
         mode = kwargs.get("mode", "baseline")
 
         if mode == "repaint":
-            # === SLAT Repainting：非编辑区直接用源的前向解析加噪，无需 inversion ===
+            # === SLAT Repainting: non-editable region uses forward analytical noising of source, no inversion needed ===
             latent_slat = kwargs["latent_slat"]
-            # 归一化到模型训练域
+            # Normalize to model training domain
             x_src = (latent_slat - mean) / std
 
-            # 初始噪声：与 coords 对齐的纯高斯，SparseTensor
+            # Initial noise: pure Gaussian aligned with coords, SparseTensor
             noise = sp.SparseTensor(
                 feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
                 coords=coords,
             )
 
-            # 把源 latent 对齐到目标 coords 上（只保留 coords 中的行，缺失位置填0）。
-            # 为简洁起见，假设 repaint 阶段调用方已经把 coords 设成源 coords（slat 编辑典型场景下成立）。
-            # 调用方需保证：x_src.coords 与 coords 对齐到相同顺序；否则 _mask_blend 会按 SparseTensor 坐标差异分支处理。
+            # Align source latent to target coords (keep only rows in coords, fill missing positions with 0).
+            # For simplicity, assume the caller has set coords to source coords in the repaint stage (holds in typical slat editing scenarios).
+            # Caller must ensure: x_src.coords are aligned to coords in the same order; otherwise _mask_blend will handle SparseTensor coordinate differences.
             repaint_kwargs = dict(kwargs)
             repaint_kwargs["mode"] = "repaint"
             repaint_kwargs["x_src"] = x_src
-            # kwargs["mask"] 已经是 raw_mask [B,1,64,64,64]，直接透传
+            # kwargs["mask"] is already raw_mask [B,1,64,64,64], pass through directly
             slat = self.slat_sampler.sample(
                 flow_model,
                 noise,
@@ -443,7 +443,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             ).samples
             slat = slat * std + mean
         else:
-            # baseline：从纯噪声生成
+            # baseline: generate from pure noise
             noise = sp.SparseTensor(
                 feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
                 coords=coords,
@@ -483,14 +483,14 @@ class TrellisImageTo3DPipeline(Pipeline):
         use_guidance: bool = True,
     ):
         """
-        完整编辑流程：先用 FlowEdit 编辑 sparse structure 体素，再用 Repainting 编辑 SLAT。
-        整个过程共用同一个 raw_mask（3D 体素掩码，[B,1,64,64,64]，1=可编辑区）。
+        Full editing pipeline: first edit sparse structure voxels with FlowEdit, then edit SLAT with Repainting.
+        The entire process shares the same raw_mask (3D voxel mask, [B,1,64,64,64], 1=editable region).
 
-        新增可调参数：
-            cfg_src_strength: FlowEdit 中源条件的 CFG 强度（默认 5.0）
-            cfg_tar_strength: FlowEdit 中目标条件的 CFG 强度（默认 5.0）
-            enable_step_viz:  是否导出 FlowEdit 每步的 4 视角可视化（默认 False，加速）
-            use_guidance:     是否启用正交轮廓引导（默认 True）
+        Additional tunable parameters:
+            cfg_src_strength: Source condition CFG strength in FlowEdit (default 5.0)
+            cfg_tar_strength: Target condition CFG strength in FlowEdit (default 5.0)
+            enable_step_viz:  Whether to export per-step 4-view visualization of FlowEdit (default False, for speed)
+            use_guidance:     Whether to enable orthographic silhouette guidance (default True)
         """
         if preprocess_image:
             ori_image = self.preprocess_image(ori_image)
@@ -505,7 +505,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         kwargs["latent_slat"] = latent_slat
         kwargs["feature_path"] = os.path.join(feature_path, "feature_flowedit_test.pkl")
         kwargs["edit_mask"] = edit_mask
-        # 新增：CFG / 引导 / 可视化开关透传到 sampler
+        # Pass CFG / guidance / visualization switches to sampler
         kwargs["cfg_src_strength"] = cfg_src_strength
         kwargs["cfg_tar_strength"] = cfg_tar_strength
         kwargs["use_guidance"] = use_guidance
@@ -521,7 +521,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         kwargs["decode_voxel_fn"] = self.models['sparse_structure_decoder']
         coords1 = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params, **kwargs)
 
-        # 将新生成的 coords1 与源 coords 按 raw_mask 合并：mask 内用新 coords，mask 外保留源 coords
+        # Merge newly generated coords1 with source coords by raw_mask: use new coords inside mask, keep source coords outside
         coords_combined = merge_coords(
             coords1,
             latent_slat.coords,
@@ -538,7 +538,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         kwargs["latent_slat"] = latent_slat
         slat = self.sample_slat(cond, coords_combined, slat_sampler_params, **kwargs)
 
-        # 导出可视化
+        # Export visualization
         os.makedirs(feature_path, exist_ok=True)
         export_indexed_coords_to_glb_cubes_colored(latent_slat.coords, os.path.join(feature_path, "vox_ori.glb"), slat_feat=latent_slat.feats)
         export_indexed_coords_to_glb_cubes_colored(coords_combined, os.path.join(feature_path, "vox_edit.glb"), slat_feat=slat.feats)
@@ -560,16 +560,16 @@ class TrellisImageTo3DPipeline(Pipeline):
         """
         Run the pipeline.
 
-        两种模式：
-          1) 普通生成：不传 latent_slat / mask -> 从纯噪声生成 sparse structure 和 slat
-          2) SLAT Repainting：传 latent_slat（源SLAT）+ mask（3D raw_mask, [B,1,64,64,64], 1=可编辑区）
-             -> sparse structure 从纯噪声生成（不做编辑），slat 阶段使用 SLAT repainting 公式：
+        Two modes:
+          1) Normal generation: do not pass latent_slat / mask -> generate sparse structure and slat from pure noise
+          2) SLAT Repainting: pass latent_slat (source SLAT) + mask (3D raw_mask, [B,1,64,64,64], 1=editable region)
+             -> sparse structure is generated from pure noise (no editing), slat stage uses SLAT repainting formula:
                 z_{k-1} = M ⊙ [z_k + Δt v_θ(z_k, t_k | cond)] + (1-M) ⊙ [(1-t_{k-1}) z^src + t_{k-1} ε_k]
 
         Args:
-            image (Image.Image): 目标图像条件 I^tgt
-            latent_slat (sp.SparseTensor, optional): 源 SLAT（未归一化），用于 repainting 的 z^src
-            mask (Tensor, optional): 3D raw_mask，[B,1,64,64,64]，值 1 表示可编辑区
+            image (Image.Image): Target image condition I^tgt
+            latent_slat (sp.SparseTensor, optional): Source SLAT (unnormalized), z^src for repainting
+            mask (Tensor, optional): 3D raw_mask, [B,1,64,64,64], value 1 = editable region
             preprocess_image (bool): Whether to preprocess the image.
         """
         if preprocess_image:
@@ -580,7 +580,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         do_repaint = (latent_slat is not None) and (mask is not None)
 
         # ===== Stage 1: sparse structure =====
-        # 不做 sparse 编辑，baseline 生成；若后续需要约束 coords，可由调用方用 latent_slat.coords 决定
+        # No sparse editing, baseline generation; if coords need to be constrained later, caller can use latent_slat.coords
         kwargs_ss = {"mode": "baseline", "stage": "sparse"}
         coords1 = self.sample_sparse_structure(
             cond, num_samples, sparse_structure_sampler_params, **kwargs_ss
@@ -588,7 +588,7 @@ class TrellisImageTo3DPipeline(Pipeline):
 
         # ===== Stage 2: slat =====
         if do_repaint:
-            # slat repaint：coords 使用源 latent_slat 的 coords，以便与 x_src 对齐
+            # slat repaint: use source latent_slat's coords so they align with x_src
             coords_slat = latent_slat.coords.to(self.device)
             kwargs_slat = {
                 "mode": "repaint",

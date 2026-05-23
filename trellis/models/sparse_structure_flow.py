@@ -209,7 +209,7 @@ class SparseStructureFlowModel(nn.Module):
         cond = cond.type(self.dtype)
         cnt=0
         for block in self.blocks:
-                ####t_sign是指步数，cnt是指层数
+                #### t_sign refers to the timestep, cnt refers to the layer index
             #attention_mask = self.create_attention_mask(h.shape[1],mask_indices, device=mask.device)
             kwargs["cnt"]=cnt
             h = block(h, t_emb, cond,**kwargs)

@@ -101,8 +101,8 @@ render.image_settings.color_mode = "RGBA"
 render.resolution_x = args.resolution
 render.resolution_y = args.resolution
 render.resolution_percentage = 100
-render.threads_mode = 'FIXED'  # 使用固定线程数模式
-render.threads = 32  # 设置线程数
+render.threads_mode = 'FIXED'  # Use fixed thread count mode
+render.threads = 32  # Set thread count
 
 scene.cycles.device = "GPU"
 scene.cycles.samples = 128   # 128
@@ -604,7 +604,7 @@ def save_images(object_file: str) -> None:
     # obj = bpy.context.selected_objects[0] if bpy.context.selected_objects else None
 
     # if obj:
-    #     obj.rotation_euler[0] += math.radians(-90)  # 绕 Z 轴右旋 90 度
+#     obj.rotation_euler[0] += math.radians(-90)  # Rotate -90 degrees around Z axis
     
     
     lights = [obj for obj in bpy.context.scene.objects if obj.type == 'LIGHT']

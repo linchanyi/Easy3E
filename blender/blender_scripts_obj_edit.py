@@ -93,8 +93,8 @@ render.image_settings.color_mode = "RGBA"
 render.resolution_x = 512
 render.resolution_y = 512
 render.resolution_percentage = 100
-render.threads_mode = 'FIXED'  # 使用固定线程数模式
-render.threads = 32  # 设置线程数
+render.threads_mode = 'FIXED'  # Use fixed thread count mode
+render.threads = 32  # Set thread count
 
 scene.cycles.device = "GPU"
 scene.cycles.samples = 128   # 128
@@ -563,7 +563,7 @@ def save_images(object_file: str) -> None:
     # obj = bpy.context.selected_objects[0] if bpy.context.selected_objects else None
 
     # if obj:
-    #     obj.rotation_euler[0] += math.radians(-90)  # 绕 Z 轴右旋 90 度
+#     obj.rotation_euler[0] += math.radians(-90)  # Rotate -90 degrees around Z axis
     
     
     lights = [obj for obj in bpy.context.scene.objects if obj.type == 'LIGHT']
@@ -588,7 +588,7 @@ def save_images(object_file: str) -> None:
     # main_light_data.energy = 7
     # main_light.rotation_euler = (math.radians(135), 0.0, math.radians(45))
 
-# # === 补光 ===
+# # === Fill light ===
 #     fill_light_data = bpy.data.lights.new(name='FillLight', type='SUN')
 #     fill_light = bpy.data.objects.new(name='FillLight', object_data=fill_light_data)
 #     bpy.context.collection.objects.link(fill_light)
@@ -596,7 +596,7 @@ def save_images(object_file: str) -> None:
 #     fill_light_data.energy = 3
 #     fill_light_data.use_shadow = False
 #     fill_light_data.specular_factor = 0.2
-#     fill_light_data.angle = 0.2  # 也调软
+#     fill_light_data.angle = 0.2  # Also soften
 #     fill_light.rotation_euler = (-0.05, 0.0, 0.0)
   
 

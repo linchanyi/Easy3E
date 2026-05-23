@@ -130,14 +130,14 @@ class FlowEulerSampler(Sampler):
             for _ in range(steps * K)
         ]
 
-        # 对偶采样（降方差，n_avg 取偶数更好）
+        # Antithetic sampling (variance reduction, works better when n_avg is even)
         if K % 2 == 0:
             for s in range(steps):
                 half = K // 2
                 for k in range(half, K):
                     eps_table[s*K + k] = -eps_table[s*K + (k - half)]
 
-        # 尾段第一次的噪声
+        # Noise for the first step of the tail segment
         tail_eps = torch.randn(sample.shape, generator=gen, device=device, dtype=dtype)
         return eps_table, tail_eps
 
@@ -146,37 +146,37 @@ class FlowEulerSampler(Sampler):
         self,
         model,
         noise,
-        cond: Optional[Any] = None,   # 仅作默认兜底，用 cond_src / cond_tar 覆盖
+        cond: Optional[Any] = None,   # Default fallback only; overridden by cond_src / cond_tar
         steps: int = 25,
         rescale_t: float = 3.0,
         verbose: bool = True,
         **kwargs
         ):
         """
-        FlowEdit 采样（免反演），不会读/写 latent 或融合 feature。
-        需要的 kwargs（都有默认，可按需传）：
-        - cond_src, cond_tar: 源/目标条件（默认用 cond）
+        FlowEdit sampling (inversion-free), does not read/write latent or fuse features.
+        Required kwargs (all have defaults, pass as needed):
+        - cond_src, cond_tar: source/target conditions (defaults to cond)
         - n_min=0, n_max=None, n_avg=4
         - alpha_sched=lambda t: t, lock_sched=lambda t: 0.0
-        - mask=None （与 sample 可广播）
-        - src_latent=None （强烈建议提供：干净的源状态；不传则用当前 sample 的快照）
+        - mask=None (broadcastable with sample)
+        - src_latent=None (strongly recommended: clean source state; if not provided, uses a snapshot of current sample)
         - use_same_noise=True
-        - forward_noise_fn=None  # 默认 (1-t)*x0 + t*eps
+        - forward_noise_fn=None  # default: (1-t)*x0 + t*eps
         """
-        # ------ 读取控制参数 ------
+        # ------ Read control parameters ------
         cond_src = kwargs["ori_cond"]
         cond_tar = cond
 
         n_min = int(kwargs.get("n_min", 2))
-        n_max = kwargs.get("n_max", None)  # None = 全程可编辑
+        n_max = kwargs.get("n_max", None)  # None = editable throughout all steps
         n_avg = int(kwargs.get("n_avg", 4))
-        alpha_sched = kwargs.get("alpha_sched", lambda t: 1.0)     # 差向量强度（前小后大）
+        alpha_sched = kwargs.get("alpha_sched", lambda t: 1.0)     # Difference vector strength (small early, large later)
         manual_mask = kwargs.get("mask", None)
         feather = int(kwargs.get("feather", 2))
         guard   = int(kwargs.get("guard", 1))
-        # 线性+下限，前中期也有一定强度
+        # Linear + lower bound, maintaining some strength in early/mid stages
         lock_sched = lambda t: min(0.95, 0.40 + (1.0 - t)*0.45)
-        # t 从 1→0：锁回从 ~0.40 增长到 ~0.85（最大 0.95）
+        # t goes from 1→0: lock-back grows from ~0.40 to ~0.85 (max 0.95)
 
 
         #soft_mask = make_soft_mask(mask)
@@ -190,47 +190,47 @@ class FlowEulerSampler(Sampler):
         ty             = float(kwargs.get("ty", 0.0))
         flip_y         = bool(kwargs.get("flip_y", False))
 
-        # 引导开关：默认开启；用旧名 use_ortho_guidance 也能兼容（如外部仍在传）
+        # Guidance switch: enabled by default; also compatible with legacy name use_ortho_guidance
         use_guidance = bool(kwargs.get("use_guidance", kwargs.get("use_ortho_guidance", True)))
         lambda0 = float(kwargs.get("lambda0", 0.0))
 
-        # CFG 强度（src / tar 解耦，允许外部覆盖）
+        # CFG strength (src / tar decoupled, allows external override)
         cfg_src_strength = float(kwargs.get("cfg_src_strength", 5.0))
         cfg_tar_strength = float(kwargs.get("cfg_tar_strength", 5.0))
 
         decode_voxel_fn = kwargs.get("decode_voxel_fn", None)
 
 
-        # ------ 初始化状态 ------
-        sample = noise  # 注意：FlowEdit 不做 latent I/O，也不融合 feature,这里noise传入的是原始
+        # ------ Initialize state ------
+        sample = noise  # Note: FlowEdit does not do latent I/O or feature fusion; noise here is the original input
         T_steps = steps
         #eps_table, tail_eps = self._prep_noise_table(noise, steps=steps, n_avg=n_avg, seed=kwargs.get("seed", 20))
-        # 源参考状态 x_src0（最好传入一个干净的 latent/图像；否则用当前 sample 的拷贝）
+        # Source reference state x_src0 (best to pass a clean latent/image; otherwise uses a copy of current sample)
         x_src0 = kwargs.get("src_latent", None)
         if x_src0 is None:
             x_src0 = sample.clone()
 
-        # 默认前向噪声函数（Rectified Flow 风格）
+        # Default forward noise function (Rectified Flow style)
         if forward_noise_fn is None:
             def forward_noise_fn(x0, t_scalar, eps):
-                # t_scalar ∈ [0,1]；保持 dtype/device 与 x0 一致
+                # t_scalar ∈ [0,1]; keeps dtype/device consistent with x0
                 sigma_min = 1e-5 
                 t_val = float(t_scalar)
                 return (1.0 - t_val) * x0 + (sigma_min + (1 - sigma_min) * t_val) * eps
         
-        # ------ 构造时间网格（与你 baseline 保持一致）------
+        # ------ Construct time grid (consistent with baseline) ------
         t_seq = np.linspace(1, 0, steps + 1)
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
         t_pairs = [(t_seq[i], t_seq[i + 1]) for i in range(steps)]
         if n_max is None:
             n_max = T_steps
 
-        # ------ 返回容器 ------
+        # ------ Return container ------
         edict = lambda d: type("edict", (object,), d)
         ret = edict({
         "samples": None, "pred_x_t": [], "pred_x_0": [],
         "viz_grid_paths": [], "auto_masks": [], "mask_metrics": []
-        })  # FIX: 增加缺失字段
+        })  # FIX: add missing fields
 
 
         iterator = enumerate(t_pairs)
@@ -244,20 +244,20 @@ class FlowEulerSampler(Sampler):
         manual_soft, manual_guard = (None, None)
         if manual_mask is not None:
             manual_soft, manual_guard = build_soft_masks(manual_mask, sample, feather=feather, guard=guard)
-        # ------ 主循环 ------
+        # ------ Main loop ------
         combined_soft  = manual_soft
 
-        # 把 edit_mask 规范到设备/形状
+        # Normalize edit_mask to device/shape
         edit_mask = _to_mask_tensor(edit_mask_in, sample)  # [B?,1,H,W]
         if edit_mask.shape[0] != sample.shape[0]:
             if edit_mask.shape[0] == 1:
                 edit_mask = edit_mask.expand(sample.shape[0], -1, -1, -1)
             else:
-                raise ValueError(f"edit_mask batch 与 sample 不匹配: {edit_mask.shape[0]} vs {sample.shape[0]}")
+                raise ValueError(f"edit_mask batch mismatch with sample: {edit_mask.shape[0]} vs {sample.shape[0]}")
         H_mask, W_mask = int(edit_mask.shape[-2]), int(edit_mask.shape[-1])
 
         for step_i, (t, t_prev) in iterator:
-            # 判定当前是否进入"可编辑中段"与"尾段目标精修"
+            # Determine whether current step is in the "editable middle segment" or "tail target refinement"
             can_edit    = (T_steps - step_i) <= n_max
             tail_refine = (T_steps - step_i) <= n_min
 
@@ -265,25 +265,25 @@ class FlowEulerSampler(Sampler):
                 continue
 
             if not tail_refine:
-                # ========= 中段：差向量场 + n_avg 平均 =========
+                # ========= Middle segment: difference vector field + n_avg averaging =========
                 V_delta_avg = torch.zeros_like(sample)
                 K = max(1, n_avg)
                 
                 
                 for k in range(K):
-                    # 同噪声差分（推荐）：src/tar 共享同一噪声实例
+                    # Same-noise differencing (recommended): src/tar share the same noise instance
                     #eps = eps_table[step_i * K + k]
                     eps = torch.randn_like(x_src0)
-                    # 构造 z_t^src 与 z_t^tar
+                    # Construct z_t^src and z_t^tar
                     zt_src = forward_noise_fn(x_src0, t, eps)
                     
-                    # mask 外保持源
+                    # Keep source outside mask
                     
                     zt_src = apply_mask_blend(zt_src, x_src0, combined_soft)
                     #zt_src = soft_mask*zt_src + (1-soft_mask)*x_src0
                     zt_tar = sample + (zt_src - x_src0)
 
-                    # 速度场（取 pred_v）
+                    # Velocity field (take pred_v)
                     kwargs["cfg_strength"] = cfg_src_strength
                     _x0s, _epss, v_src = self._get_model_prediction(model, zt_src, t, cond_src, **kwargs)
                     kwargs["cfg_strength"] = cfg_tar_strength
@@ -298,7 +298,7 @@ class FlowEulerSampler(Sampler):
                 
                 
                 V_delta_avg = V_delta_avg * combined_soft
-                # Euler 前进一步（与你 baseline 相同的符号）
+                # Euler step forward (same notation as baseline)
                 dt = (t - t_prev)
                 alpha = alpha_sched(float(t))
                 pred_x_prev = sample - dt * (alpha * V_delta_avg)
@@ -311,7 +311,7 @@ class FlowEulerSampler(Sampler):
                     try:
                         with torch.enable_grad():
                             x_t = new_state.detach().requires_grad_(True)
-                            sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W]（连续）
+                            sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
                             tau  = 0.6 if float(t) > 0.5 else 0.5
                             sil  = _silhouette_from_sigma(sigma, tau=tau)       # [B,1,Hs,Ws]
                             sil_img = project_ortho_no_center(
@@ -321,16 +321,15 @@ class FlowEulerSampler(Sampler):
 
                             sil_img = apply_orient_2d(
                             sil_img,
-                            rot90k=3,                 # ← 逆时针90°：在我之前的实现里 rot90k=3 是 CCW 90°
+                            rot90k=3,                 # CCW 90 degrees: rot90k=3 means counter-clockwise 90°
                             swap_xy=False
                             )
 
-                            # 损失（后续可叠加DT/轮廓损）
+                            # Loss (can stack DT/contour loss later)
                             L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
                             g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
 
-                            # —— 逐层梯度强度 —— 
-                            #g_x, stats = grad_chain_diagnostics(L_ortho, x_t, sigma=sigma, sil=sil, sil_img=sil_img)
+                            # -- Per-layer gradient strength --                             #g_x, stats = grad_chain_diagnostics(L_ortho, x_t, sigma=sigma, sil=sil, sil_img=sil_img)
                             a=_stat(g_latent,"g_latent")
 
                             ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
@@ -345,17 +344,17 @@ class FlowEulerSampler(Sampler):
 
                 pred_x_prev = new_state
 
-                # 非 mask 区域"吸回源"（可选）
+                # Pull non-mask region back to source (optional)
                 lock = lock_sched(float(t))
                 if (manual_mask is not None) and (lock > 0):
                     pred_x_prev = (1 - lock * (1 - manual_mask)) * pred_x_prev + (lock * (1 - manual_mask)) * x_src0
 
                 sample = pred_x_prev
                 ret.pred_x_t.append(pred_x_prev)
-                ret.pred_x_0.append(None)  # 如需 x0，可额外再前向一次
+                ret.pred_x_0.append(None)  # If x0 is needed, run an additional forward pass
 
             else:
-                # ========= 尾段：目标精修（SDEdit 风格，仅用目标条件） =========
+                # ========= Tail segment: target refinement (SDEdit style, target condition only) =========
                 if (T_steps - step_i) == n_min:
                     #eps = tail_eps
                     eps = torch.randn_like(x_src0)
@@ -366,7 +365,7 @@ class FlowEulerSampler(Sampler):
                     xt_tar = sample
                 kwargs["cfg_strength"] = cfg_tar_strength
                 pred_x0, pred_eps, v_tar = self._get_model_prediction(model, xt_tar, t, cond_tar, **kwargs)
-                if combined_soft is not None:  # FIX: 防 None
+                if combined_soft is not None:  # FIX: guard against None
                     v_tar = v_tar * combined_soft
                 dt = (t - t_prev)
                 pred_x_prev = xt_tar - dt * v_tar
@@ -376,7 +375,7 @@ class FlowEulerSampler(Sampler):
                     try:
                         with torch.enable_grad():
                             x_t = new_state.detach().requires_grad_(True)
-                            sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W]（连续）
+                            sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
                             tau  = 0.6 if float(t) > 0.5 else 0.5
                             sil  = _silhouette_from_sigma(sigma, tau=tau)       # [B,1,Hs,Ws]
                             sil_img = project_ortho_no_center(
@@ -386,13 +385,12 @@ class FlowEulerSampler(Sampler):
 
                             sil_img = apply_orient_2d(
                             sil_img,
-                            rot90k=3,                 # ← 逆时针90°：在我之前的实现里 rot90k=3 是 CCW 90°
+                            rot90k=3,                 # CCW 90 degrees: rot90k=3 means counter-clockwise 90°
                             swap_xy=False
                             )
 
-                            # 损失（后续可叠加DT/轮廓损）
-                            L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
-                            g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
+                            # Loss (can stack DT/contour loss later)
+                            L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)                            g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
 
                             ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
 
@@ -406,7 +404,7 @@ class FlowEulerSampler(Sampler):
 
                 pred_x_prev = new_state
 
-                # 非 mask 区域"吸回源"（可选）
+                # Pull non-mask region back to source (optional)
                 lock = lock_sched(float(t))
                 if (manual_mask is not None) and (lock > 0):
                     pred_x_prev = (1 - lock * (1 - manual_mask)) * pred_x_prev + (lock * (1 - manual_mask)) * x_src0
@@ -421,7 +419,7 @@ class FlowEulerSampler(Sampler):
             try:
                 with torch.enable_grad():
                     x_t = new_state.detach().requires_grad_(True)
-                    sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W]（连续）
+                    sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
                     tau  = 0.6 if float(t) > 0.5 else 0.5
                     sil  = _silhouette_from_sigma(sigma, tau=tau)       # [B,1,Hs,Ws]
                     sil_img = project_ortho_no_center(
@@ -431,13 +429,12 @@ class FlowEulerSampler(Sampler):
 
                     sil_img = apply_orient_2d(
                         sil_img,
-                        rot90k=3,                 # ← 逆时针90°：在我之前的实现里 rot90k=3 是 CCW 90°
+                        rot90k=3,                 # CCW 90 degrees: rot90k=3 means counter-clockwise 90°
                         swap_xy=False
                     )
 
-                    # 损失（后续可叠加DT/轮廓损）
-                    L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
-                    g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
+                    # Loss (can stack DT/contour loss later)
+                    L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)                    g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
 
                     ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
 
@@ -463,7 +460,7 @@ class FlowEulerSampler(Sampler):
         **kwargs
     ):
         """
-        Baseline 纯前向生成：从噪声一路采样到 x_0，不涉及 repainting/inversion。
+        Baseline pure forward generation: sample from noise all the way to x_0, no repainting/inversion involved.
         """
         sample = noise
         t_seq = np.linspace(1, 0, steps + 1)
@@ -495,20 +492,20 @@ class FlowEulerSampler(Sampler):
         **kwargs
     ):
         """
-        SLAT Repainting 采样（免反演）。
+        SLAT Repainting sampling (inversion-free).
 
-        公式（对每个时间步 t -> t_prev）：
+        Formula (for each timestep t -> t_prev):
             z_edit  = z_k + Δt * v_θ(z_k, t_k | cond_tar)
             z_src_t = (sigma_min + (1 - sigma_min) * t_prev) * eps + (1 - t_prev) * x_src
             z_{k-1} = M ⊙ z_edit + (1 - M) ⊙ z_src_t
 
-        需要的 kwargs:
-            - x_src: 源样本 latent（"干净" x_0）。SparseTensor 或 Tensor，shape 与 noise 对齐。
-            - mask: M，与 x_src/sample 广播兼容。值 1 为可编辑区，0 为保持源。
-                    - Tensor（稠密）: 形状 broadcastable 到 sample
-                    - SparseTensor: 逐行(feats)的 0/1 掩码，与 sample.feats 对齐
-                    - None: 全部可编辑（退化为普通生成）
-            - stage: "sparse" | "slat"，用于决定掩码/加噪的具体分支
+        Required kwargs:
+            - x_src: Source sample latent ("clean" x_0). SparseTensor or Tensor, shape aligned with noise.
+            - mask: M, broadcastable with x_src/sample. Value 1 = editable region, 0 = keep source.
+                    - Tensor (dense): shape broadcastable to sample
+                    - SparseTensor: per-row (feats) 0/1 mask, aligned with sample.feats
+                    - None: all editable (degenerates to normal generation)
+            - stage: "sparse" | "slat", determines the specific branch for masking/noising
         """
         sample = noise
         x_src = kwargs.get("x_src", None)
@@ -525,16 +522,16 @@ class FlowEulerSampler(Sampler):
             kwargs["t_sign"] = t
             kwargs["t_1"] = t
 
-            # 1) 走目标条件的一步 Euler，得到 z_edit
+            # 1) One Euler step with target condition to get z_edit
             out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
             z_edit = out.pred_x_prev
 
-            # 2) 非编辑区域：源的前向解析加噪，得到 z_src_t_prev
+            # 2) Non-editable region: forward analytical noising of source to get z_src_t_prev
             if x_src is not None and mask is not None:
                 z_src_t_prev = self._forward_diffuse_src(x_src, t_prev, stage=stage)
                 z_next = self._mask_blend(z_edit, z_src_t_prev, mask, stage=stage)
             else:
-                # 无源/无掩码则退化为普通生成
+                # No source/mask: degenerates to normal generation
                 z_next = z_edit
 
             sample = z_next
@@ -546,32 +543,32 @@ class FlowEulerSampler(Sampler):
 
     def _forward_diffuse_src(self, x_src, t_prev, stage="sparse"):
         """
-        源样本的前向解析加噪（rectified flow 风格）：
+        Forward analytical noising of source sample (rectified flow style):
             z_t = (1 - t) * x_src + (sigma_min + (1 - sigma_min) * t) * eps
-        返回与 x_src 同类型的对象（Tensor or SparseTensor）。
+        Returns an object of the same type as x_src (Tensor or SparseTensor).
         """
         t_val = float(t_prev)
         scale_src = 1.0 - t_val
         scale_eps = self.sigma_min + (1.0 - self.sigma_min) * t_val
 
-        # SparseTensor：对 feats 加噪，保持 coords 不变
+        # SparseTensor: add noise to feats, keep coords unchanged
         if hasattr(x_src, "feats") and hasattr(x_src, "coords"):
             eps = torch.randn_like(x_src.feats)
             new_feats = scale_src * x_src.feats + scale_eps * eps
             return x_src.replace(feats=new_feats)
 
-        # 稠密 Tensor
+        # Dense Tensor
         eps = torch.randn_like(x_src)
         return scale_src * x_src + scale_eps * eps
 
     def _mask_blend(self, z_edit, z_src_t, mask, stage="sparse"):
         """
-        掩码混合：z = M * z_edit + (1 - M) * z_src_t
-        - stage="sparse"：稠密 Tensor，mask 与 z_edit 广播兼容
-        - stage="slat"：SparseTensor。此时默认 z_edit 与 z_src_t 坐标一致（repaint 要求），
-                        mask 为每行的 0/1 标量，或 3D raw_mask 由调用方先转成逐行掩码。
+        Mask blending: z = M * z_edit + (1 - M) * z_src_t
+        - stage="sparse": dense Tensor, mask broadcastable with z_edit
+        - stage="slat": SparseTensor. Assumes z_edit and z_src_t have aligned coordinates (repaint requirement),
+                        mask is a per-row 0/1 scalar, or 3D raw_mask pre-converted to per-row mask by caller.
         """
-        # 稠密 Tensor 分支
+        # Dense Tensor branch
         if not (hasattr(z_edit, "feats") and hasattr(z_edit, "coords")):
             m = mask
             if not torch.is_tensor(m):
@@ -580,8 +577,8 @@ class FlowEulerSampler(Sampler):
                 m = m.to(device=z_edit.device, dtype=z_edit.dtype)
             return m * z_edit + (1.0 - m) * z_src_t
 
-        # SparseTensor 分支：使用 blend_feats_ring1_outside_rawmask，与项目原有掩码兼容
-        # mask 此处预期为 [B,1,64,64,64] 的 raw_mask
+        # SparseTensor branch: use blend_feats_ring1_outside_rawmask, compatible with project's existing mask format
+        # mask here is expected to be raw_mask of shape [B,1,64,64,64]
         alpha = 0.0
         return blend_feats_ring1_outside_rawmask(z_edit, z_src_t, mask, alpha=alpha)
 

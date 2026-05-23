@@ -148,7 +148,7 @@ class ModulatedTransformerCrossBlock(nn.Module):
 
         h = self.norm2(x)
         h_cross = self.cross_attn(h,context,**kwargs)
-        #可以直接记录h_cross
+            #can directly record h_cross
         x = x + h_cross
 
         h = self.norm3(x)
