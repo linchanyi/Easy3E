@@ -81,7 +81,11 @@ def _render(args, obj_path, output_dir, num_views=150, original_image=None,
 
 
 def copy_camera_png(args, fname="012.png"):
-    """Copy {root}/edit_views/image_ori/{fname} to {root}/ori/{fname}."""
+    """Copy {root}/edit_views/image_ori/{fname} to {root}/ori/{fname}.
+
+    The filename (e.g. '012.png') determines the editing view angle.
+    View index i corresponds to azimuth = i * 360/16 degrees.
+    """
     root = Path(args.root_dir)
     src = root / "edit_views" / "image_ori" / fname
     dst_dir = root / "ori"
@@ -93,6 +97,11 @@ def copy_camera_png(args, fname="012.png"):
     dst_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     print(f"[copy] {src} -> {dst}")
+
+    # Also extract view index for downstream use
+    view_idx = int(os.path.splitext(fname)[0])
+    azimuth_deg = view_idx * 360.0 / 16.0
+    print(f"[copy] Selected view index={view_idx}, azimuth={azimuth_deg:.1f}°")
 
 
 def extract_feature_single_object(

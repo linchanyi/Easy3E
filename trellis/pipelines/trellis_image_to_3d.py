@@ -481,6 +481,8 @@ class TrellisImageTo3DPipeline(Pipeline):
         cfg_tar_strength: float = 5.0,
         enable_step_viz: bool = False,
         use_guidance: bool = True,
+        azimuth_deg: float = 270.0,
+        debug_guidance_viz: bool = False,
     ):
         """
         Full editing pipeline: first edit sparse structure voxels with FlowEdit, then edit SLAT with Repainting.
@@ -491,6 +493,10 @@ class TrellisImageTo3DPipeline(Pipeline):
             cfg_tar_strength: Target condition CFG strength in FlowEdit (default 5.0)
             enable_step_viz:  Whether to export per-step 4-view visualization of FlowEdit (default False, for speed)
             use_guidance:     Whether to enable orthographic silhouette guidance (default True)
+            azimuth_deg:      Camera azimuth angle in degrees for guidance projection (default 270.0 = front view 012.png).
+                              Automatically determined from the ori/ folder filename.
+            debug_guidance_viz: Whether to save debug visualization of guidance alignment (default False).
+                              Saves side-by-side images of [silhouette | edit_mask | overlay] to feature/guidance_debug/.
         """
         if preprocess_image:
             ori_image = self.preprocess_image(ori_image)
@@ -510,6 +516,9 @@ class TrellisImageTo3DPipeline(Pipeline):
         kwargs["cfg_tar_strength"] = cfg_tar_strength
         kwargs["use_guidance"] = use_guidance
         kwargs["enable_step_viz"] = enable_step_viz
+        kwargs["azimuth_deg"] = azimuth_deg
+        kwargs["debug_guidance_viz"] = debug_guidance_viz
+        kwargs["debug_viz_dir"] = os.path.join(os.path.dirname(feature_path), "guidance_debug") if debug_guidance_viz else None
         if latent_mask is not None:
             kwargs["mask"] = latent_mask
             kwargs["use_mask"] = True

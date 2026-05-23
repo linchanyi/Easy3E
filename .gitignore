@@ -49,3 +49,6 @@ Thumbs.db
 
 # === Misc ===
 image.png
+
+# === Example data (not tracked) ===
+examples/

@@ -1,4 +1,4 @@
-# Easy3E: Easy 3D Editing via FlowEdit (CVPR 2026)
+# Easy3E: Easy 3D Editing via FlowEdit 🎉 (Accepted to CVPR 2026!)
 
 <p align="center">
   <img src="assets/teaser.png" alt="Easy3E Teaser" width="90%">
@@ -75,26 +75,6 @@ Or set the `BLENDER_PATH` environment variable to point to your existing Blender
 
 ```bash
 export BLENDER_PATH=/path/to/blender
-```
-
-### 5. Download pretrained weights
-
-Download the TRELLIS-image-large checkpoint and place it under `checkpoint/`:
-
-```
-checkpoint/
-  TRELLIS-image-large/
-    pipeline.json
-    ckpts/
-      ss_enc_conv3d_16l8_fp16.safetensors
-      ss_dec_conv3d_16l8_fp16.safetensors
-      ss_flow_img_dit_L_16l8_fp16.safetensors
-      slat_enc_swin8_B_64l8_fp16.safetensors
-      slat_dec_gs_swin8_B_64l8gs32_fp16.safetensors
-      slat_dec_mesh_swin8_B_64l8m256c_fp16.safetensors
-      slat_dec_rf_swin8_B_64l8r16_fp16.safetensors
-      slat_flow_img_dit_L_64l8p2_fp16.safetensors
-      ... (and corresponding .json config files)
 ```
 
 ## 📁 Directory Structure
@@ -227,11 +207,7 @@ python inference.py \
 
 ## 🙏 Acknowledgements
 
-This project builds upon:
-- [TRELLIS](https://github.com/Microsoft/TRELLIS) — 3D asset generation via structured latents
-- [DINOv2](https://github.com/facebookresearch/dinov2) — Self-supervised vision features
-- [Blender](https://www.blender.org/) — 3D rendering engine
-- [FlexiCubes](https://github.com/nv-tlabs/FlexiCubes) — Mesh extraction
+This project builds upon [TRELLIS](https://github.com/Microsoft/TRELLIS) — 3D asset generation via structured latents.
 
 ## 📄 License
 

@@ -22,6 +22,7 @@ from PIL import Image
 import trellis.modules.sparse as sp
 from trellis.pipelines import TrellisImageTo3DPipeline
 from trellis.utils import postprocessing_utils
+from trellis.utils.general_utils import get_view_azimuth_from_ori
 
 from .utils import (
     _build_masks_from_mask_glb,
@@ -81,6 +82,22 @@ def load_edit_mask_from_rgba(
         return t
 
 
+def _get_azimuth_from_ori(args) -> float:
+    """Extract azimuth angle from the ori folder filename.
+
+    Reads the filename in {root_dir}/ori/ (e.g. '005.png') and computes
+    azimuth = view_idx * 360 / 16 degrees.
+    Falls back to 270.0 (front view, 012.png) if extraction fails.
+    """
+    try:
+        ori_dir = os.path.join(args.root_dir, "ori")
+        _, azimuth_deg = get_view_azimuth_from_ori(ori_dir)
+        return azimuth_deg
+    except Exception as e:
+        print(f"[WARN] Could not extract azimuth from ori folder: {e}. Using default 270°.")
+        return 270.0
+
+
 def process_single_sample(args, pipeline=None, encoder=None, image_path=None):
     """Run the edit / baseline pipeline for a single input image.
 
@@ -137,10 +154,19 @@ def process_single_sample(args, pipeline=None, encoder=None, image_path=None):
 
             edit_name = os.path.splitext(filename)[0]
             mask_path = os.path.join(args.mask_dir, f"{edit_name}.glb")
+            if not os.path.exists(mask_path):
+                # Fallback: find any .glb file in mask_dir
+                glb_files = [f for f in os.listdir(args.mask_dir) if f.endswith('.glb')]
+                if not glb_files:
+                    raise FileNotFoundError(f"[mask] No .glb file found in {args.mask_dir}")
+                mask_path = os.path.join(args.mask_dir, glb_files[0])
+                print(f"[INFO] Mask '{edit_name}.glb' not found, using fallback: {glb_files[0]}")
             mask_cache_dir = os.path.join(args.root_dir, ".mask_cache", edit_name)
             os.makedirs(mask_cache_dir, exist_ok=True)
             _normalize_mask(args, mask_path, mask_cache_dir)
-            normalized_ply = os.path.join(mask_cache_dir, f"{edit_name}.ply")
+            # Blender outputs ply with the same stem as the input file
+            mask_stem = os.path.splitext(os.path.basename(mask_path))[0]
+            normalized_ply = os.path.join(mask_cache_dir, f"{mask_stem}.ply")
             raw_mask, latent_mask = _build_masks_from_mask_glb(args, normalized_ply)
 
             outputs = pipeline.flowedit(
@@ -158,6 +184,8 @@ def process_single_sample(args, pipeline=None, encoder=None, image_path=None):
                 cfg_tar_strength=args.cfg_tar,
                 enable_step_viz=args.enable_step_viz,
                 use_guidance=(not args.no_guidance),
+                azimuth_deg=_get_azimuth_from_ori(args),
+                debug_guidance_viz=getattr(args, 'debug_guidance_viz', False),
             )
 
         else:

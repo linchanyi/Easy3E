@@ -57,6 +57,8 @@ def parse_args():
                       help="Export per-step FlowEdit visualization")
     parser.add_argument("--no_guidance", action="store_true",
                       help="Disable orthographic silhouette guidance")
+    parser.add_argument("--debug_guidance_viz", action="store_true",
+                      help="Save debug visualization of guidance alignment (silhouette vs edit mask)")
 
     return parser.parse_args()
 

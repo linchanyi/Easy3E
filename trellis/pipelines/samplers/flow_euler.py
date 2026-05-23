@@ -23,6 +23,7 @@ from ...utils.general_utils import (
     blend_feats_ring1_outside_rawmask
 )
 from ...utils.general_utils import grad_chain_diagnostics,blend_feats_ring1_outside
+from ...utils.general_utils import silhouette_at_azimuth, save_guidance_debug_viz
 class FlowEulerSampler(Sampler):
     """
     Generate samples from a flow-matching model using Euler sampling.
@@ -192,7 +193,13 @@ class FlowEulerSampler(Sampler):
 
         # Guidance switch: enabled by default; also compatible with legacy name use_ortho_guidance
         use_guidance = bool(kwargs.get("use_guidance", kwargs.get("use_ortho_guidance", True)))
-        lambda0 = float(kwargs.get("lambda0", 0.0))
+        lambda0 = float(kwargs.get("lambda0", 1.0))
+
+        # Camera azimuth for guidance projection (default 270° = front view = 012.png)
+        azimuth_deg = float(kwargs.get("azimuth_deg", 270.0))
+        # Debug visualization switch for guidance alignment
+        debug_guidance_viz = bool(kwargs.get("debug_guidance_viz", False))
+        debug_viz_dir = kwargs.get("debug_viz_dir", None)
 
         # CFG strength (src / tar decoupled, allows external override)
         cfg_src_strength = float(kwargs.get("cfg_src_strength", 5.0))
@@ -313,31 +320,30 @@ class FlowEulerSampler(Sampler):
                             x_t = new_state.detach().requires_grad_(True)
                             sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
                             tau  = 0.6 if float(t) > 0.5 else 0.5
-                            sil  = _silhouette_from_sigma(sigma, tau=tau)       # [B,1,Hs,Ws]
+
+                            # Project silhouette at the specified azimuth angle
+                            sil_raw = silhouette_at_azimuth(sigma, azimuth_deg=azimuth_deg, tau=tau)
                             sil_img = project_ortho_no_center(
-                                sil, out_hw=(H_mask, W_mask),
+                                sil_raw, out_hw=(H_mask, W_mask),
                                 ortho_scale=ortho_scale, tx=tx, ty=ty, flip_y=flip_y
                             )  # [B,1,H,W]
 
-                            sil_img = apply_orient_2d(
-                            sil_img,
-                            rot90k=3,                 # CCW 90 degrees: rot90k=3 means counter-clockwise 90°
-                            swap_xy=False
-                            )
+                            # Debug visualization (save every 5 steps to avoid too many files)
+                            if debug_guidance_viz and debug_viz_dir and (step_i % 5 == 0):
+                                save_guidance_debug_viz(
+                                    sil_img, edit_mask, step_i, azimuth_deg, debug_viz_dir,
+                                    prefix="mid"
+                                )
 
                             # Loss (can stack DT/contour loss later)
                             L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
                             g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
 
-                            # -- Per-layer gradient strength --                             #g_x, stats = grad_chain_diagnostics(L_ortho, x_t, sigma=sigma, sil=sil, sil_img=sil_img)
                             a=_stat(g_latent,"g_latent")
 
                             ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
 
                             if use_guidance and (g_latent is not None):
-                                #lam = lambda0 * (1.0 - float(t))**2
-                                #if combined_soft is not None:
-                                    #g_latent = g_latent * combined_soft
                                 new_state = new_state - dt * (lambda0 * g_latent)
                     except Exception as e:
                         ret.mask_metrics.append({"step": int(step_i), "err": str(e)})
@@ -377,27 +383,28 @@ class FlowEulerSampler(Sampler):
                             x_t = new_state.detach().requires_grad_(True)
                             sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
                             tau  = 0.6 if float(t) > 0.5 else 0.5
-                            sil  = _silhouette_from_sigma(sigma, tau=tau)       # [B,1,Hs,Ws]
+
+                            # Project silhouette at the specified azimuth angle
+                            sil_raw = silhouette_at_azimuth(sigma, azimuth_deg=azimuth_deg, tau=tau)
                             sil_img = project_ortho_no_center(
-                                sil, out_hw=(H_mask, W_mask),
+                                sil_raw, out_hw=(H_mask, W_mask),
                                 ortho_scale=ortho_scale, tx=tx, ty=ty, flip_y=flip_y
                             )  # [B,1,H,W]
 
-                            sil_img = apply_orient_2d(
-                            sil_img,
-                            rot90k=3,                 # CCW 90 degrees: rot90k=3 means counter-clockwise 90°
-                            swap_xy=False
-                            )
+                            # Debug visualization
+                            if debug_guidance_viz and debug_viz_dir and (step_i % 5 == 0):
+                                save_guidance_debug_viz(
+                                    sil_img, edit_mask, step_i, azimuth_deg, debug_viz_dir,
+                                    prefix="tail"
+                                )
 
-                            # Loss (can stack DT/contour loss later)
-                            L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)                            g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
+                            # Loss
+                            L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
+                            g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
 
                             ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
 
                             if use_guidance and (g_latent is not None):
-                                #lam = lambda0 * (1.0 - float(t))**2
-                                #if combined_soft is not None:
-                                    #g_latent = g_latent * combined_soft
                                 new_state = new_state - dt * (lambda0 * g_latent)
                     except Exception as e:
                         ret.mask_metrics.append({"step": int(step_i), "err": str(e)})
@@ -421,25 +428,30 @@ class FlowEulerSampler(Sampler):
                     x_t = new_state.detach().requires_grad_(True)
                     sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
                     tau  = 0.6 if float(t) > 0.5 else 0.5
-                    sil  = _silhouette_from_sigma(sigma, tau=tau)       # [B,1,Hs,Ws]
+
+                    # Project silhouette at the specified azimuth angle
+                    sil_raw = silhouette_at_azimuth(sigma, azimuth_deg=azimuth_deg, tau=tau)
                     sil_img = project_ortho_no_center(
-                        sil, out_hw=(H_mask, W_mask),
+                        sil_raw, out_hw=(H_mask, W_mask),
                         ortho_scale=ortho_scale, tx=tx, ty=ty, flip_y=flip_y
                     )  # [B,1,H,W]
 
-                    sil_img = apply_orient_2d(
-                        sil_img,
-                        rot90k=3,                 # CCW 90 degrees: rot90k=3 means counter-clockwise 90°
-                        swap_xy=False
-                    )
+                    # Debug visualization (final step)
+                    if debug_guidance_viz and debug_viz_dir:
+                        save_guidance_debug_viz(
+                            sil_img, edit_mask, step_i, azimuth_deg, debug_viz_dir,
+                            prefix="final"
+                        )
 
-                    # Loss (can stack DT/contour loss later)
-                    L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)                    g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
+                    # Loss
+                    L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
+                    g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
 
                     ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
 
                     if use_guidance and (g_latent is not None):
-                        g_latent = g_latent * combined_soft
+                        if combined_soft is not None:
+                            g_latent = g_latent * combined_soft
                         new_state = new_state - dt * (lambda0 * g_latent)
             except Exception as e:
                 ret.mask_metrics.append({"step": int(step_i), "err": str(e)})

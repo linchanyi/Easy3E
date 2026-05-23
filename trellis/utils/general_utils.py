@@ -439,6 +439,171 @@ def project_ortho_no_center(sil_world, out_hw, ortho_scale: float,
     grid = F.affine_grid(theta, size=(B, 1, H, W), align_corners=True)
     img = F.grid_sample(sil_world, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
     return img
+# ---------- Multi-View Guidance Utilities ----------
+
+def load_camera_params_from_npy(camera_dir: str, view_idx: int) -> dict:
+    """Load camera parameters from edit_views/camera/{view_idx:03d}.npy.
+
+    Returns a dict with keys: azimuth, elevation, distance, intrinsic, extrinsic, etc.
+    """
+    npy_path = os.path.join(camera_dir, f"{view_idx:03d}.npy")
+    if not os.path.exists(npy_path):
+        raise FileNotFoundError(f"Camera params not found: {npy_path}")
+    params = np.load(npy_path, allow_pickle=True).item()
+    return params
+
+
+def get_view_azimuth_from_ori(ori_dir: str) -> Tuple[int, float]:
+    """Extract view index and azimuth from the ori folder filename.
+
+    The ori folder should contain exactly one file like '012.png'.
+    Returns (view_idx, azimuth_deg).
+    """
+    import glob
+    files = glob.glob(os.path.join(ori_dir, "*.png"))
+    if not files:
+        raise FileNotFoundError(f"No PNG files found in ori dir: {ori_dir}")
+    # Use the first (and typically only) file
+    fname = os.path.basename(files[0])
+    view_idx = int(os.path.splitext(fname)[0])
+    # 16 ortho views: azimuth = view_idx * 360 / 16
+    azimuth_deg = view_idx * 360.0 / 16.0
+    return view_idx, azimuth_deg
+
+
+def rotate_volume_z(sigma: torch.Tensor, angle_rad: float) -> torch.Tensor:
+    """Rotate a 5D volume [B,C,D,H,W] around the Z axis (dim=2) by angle_rad.
+
+    Uses F.grid_sample for differentiable rotation.
+    The volume axes are [B, C, Z, Y, X].
+    Rotation around Z means rotating in the XY plane.
+
+    Args:
+        sigma: [B, C, Z, Y, X] volume tensor
+        angle_rad: rotation angle in radians (positive = counter-clockwise when viewed from +Z)
+
+    Returns:
+        Rotated volume of same shape.
+    """
+    B, C, D, H, W = sigma.shape
+    device = sigma.device
+    dtype = sigma.dtype
+
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+
+    # Build affine matrix for 3D grid_sample
+    # grid_sample expects theta of shape [B, 3, 4] for 5D input
+    # We rotate in the XY plane (last two dims of the volume = Y, X = dims 3,4)
+    # In grid_sample coordinates: dim order is (D, H, W) -> (Z, Y, X)
+    # Rotation around Z: X' = cos*X - sin*Y, Y' = sin*X + cos*Y, Z' = Z
+    theta = sigma.new_zeros(B, 3, 4)
+    # Row 0: Z (depth) - no change
+    theta[:, 0, 0] = 1.0
+    # Row 1: Y (height) -> cos*Y + sin*X
+    theta[:, 1, 1] = cos_a
+    theta[:, 1, 2] = sin_a
+    # Row 2: X (width) -> -sin*Y + cos*X
+    theta[:, 2, 1] = -sin_a
+    theta[:, 2, 2] = cos_a
+
+    grid = F.affine_grid(theta, size=(B, C, D, H, W), align_corners=True)
+    rotated = F.grid_sample(sigma, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+    return rotated
+
+
+def silhouette_at_azimuth(
+    sigma: torch.Tensor,
+    azimuth_deg: float,
+    tau: float = 0.6,
+    front_azimuth_deg: float = 270.0,
+    **kwargs
+) -> torch.Tensor:
+    """Compute silhouette from a volume at an arbitrary azimuth angle.
+
+    The approach: rotate the volume so that the target azimuth aligns with
+    the front view direction (Y-axis projection), then use _silhouette_from_sigma.
+
+    Args:
+        sigma: [B,1,Z,Y,X] decoded voxel volume (logits)
+        azimuth_deg: target camera azimuth in degrees (Blender convention:
+                     camera at (cos(az), sin(az), 0))
+        tau: temperature for sigmoid
+        front_azimuth_deg: the azimuth that corresponds to the "front" view
+                          (default 270° = view 012, camera at (0,-1,0), looking along +Y)
+
+    Returns:
+        sil: [B,1,H,W] silhouette image
+    """
+    # Compute how much to rotate the volume to align target azimuth to front
+    # Front view looks along +Y direction (camera at -Y)
+    # Camera at azimuth a is at (cos(a), sin(a), 0), looking toward origin
+    # To make camera at azimuth_deg equivalent to front (270°),
+    # we rotate the volume by (azimuth_deg - front_azimuth_deg) around Z
+    delta_deg = azimuth_deg - front_azimuth_deg
+    delta_rad = np.radians(delta_deg)
+
+    if abs(delta_deg % 360.0) < 1e-3:
+        # No rotation needed (front view)
+        rotated = sigma
+    else:
+        rotated = rotate_volume_z(sigma, delta_rad)
+
+    # Project along Y axis (same as front view)
+    sil = _silhouette_from_sigma(rotated, depth_axis='y', tau=tau, **kwargs)
+
+    # Apply the same orientation correction as front view (rot90=1)
+    sil = sil.transpose(-2, -1).flip(-2)
+
+    return sil
+
+
+def save_guidance_debug_viz(
+    sil_img: torch.Tensor,
+    edit_mask: torch.Tensor,
+    step_i: int,
+    azimuth_deg: float,
+    save_dir: str,
+    prefix: str = "guidance"
+):
+    """Save a debug visualization comparing projected silhouette vs edit mask.
+
+    Creates a side-by-side image: [silhouette | edit_mask | overlay]
+    Useful for verifying view alignment.
+
+    Args:
+        sil_img: [B,1,H,W] projected silhouette (0~1)
+        edit_mask: [B,1,H,W] target edit mask (0~1)
+        step_i: current sampling step index
+        azimuth_deg: camera azimuth for annotation
+        save_dir: directory to save debug images
+    """
+    if not HAS_PIL:
+        return
+    os.makedirs(save_dir, exist_ok=True)
+
+    sil_np = sil_img[0, 0].detach().clamp(0, 1).cpu().numpy()
+    mask_np = edit_mask[0, 0].detach().clamp(0, 1).cpu().numpy()
+
+    # Create overlay: green = silhouette, red = mask, yellow = overlap
+    H, W = sil_np.shape
+    overlay = np.zeros((H, W, 3), dtype=np.float32)
+    overlay[..., 0] = mask_np       # Red channel = edit mask
+    overlay[..., 1] = sil_np        # Green channel = silhouette
+    # Yellow where both overlap
+
+    # Side by side: sil | mask | overlay
+    sil_rgb = np.stack([sil_np]*3, axis=-1)
+    mask_rgb = np.stack([mask_np]*3, axis=-1)
+
+    panel = np.concatenate([sil_rgb, mask_rgb, overlay], axis=1)
+    panel = (np.clip(panel, 0, 1) * 255).astype(np.uint8)
+
+    img = Image.fromarray(panel)
+    save_path = os.path.join(save_dir, f"{prefix}_step{step_i:03d}_az{azimuth_deg:.1f}.png")
+    img.save(save_path)
+
+
 # ---------- Shape/Spatial Alignment & Pooling ----------
 def _resolve_viz_base(feature_path, fallback="."):
     if feature_path is None:
