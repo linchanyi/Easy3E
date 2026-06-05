@@ -1,16 +1,3 @@
-"""Edit / baseline stage for the Edit pipeline.
-
-Tasks performed in this stage (once per input image):
-1. Load cached mesh / latent from the preprocess stage
-2. Extract edit_mask from the input RGBA image (alpha channel)
-3. Optionally: load mask.glb, construct 3D latent_mask / raw_mask
-4. Call `pipeline.flowedit` (edit mode) or `pipeline.run` (baseline mode) to produce output
-5. Export the edited result as `<output_dir>/<edit_name>.glb` (the only user-facing output)
-6. Write intermediate artifacts under root_dir for Blender post-processing and subsequent edits
-
-Entry point: `process_single_sample(args, pipeline, encoder, image_path)`
-"""
-
 import os
 import traceback
 
@@ -44,10 +31,6 @@ def load_edit_mask_from_rgba(
     save_path=None,
     device=None
 ):
-    """Extract an edit mask from the alpha channel of an RGBA image.
-    White(1) = object, Black(0) = background.
-    soft=True uses normalized alpha directly; soft=False applies threshold binarization.
-    """
     img = Image.open(image_path).convert("RGBA")
 
     if target_size is not None:
@@ -83,12 +66,6 @@ def load_edit_mask_from_rgba(
 
 
 def _get_azimuth_from_ori(args) -> float:
-    """Extract azimuth angle from the ori folder filename.
-
-    Reads the filename in {root_dir}/ori/ (e.g. '005.png') and computes
-    azimuth = view_idx * 360 / 16 degrees.
-    Falls back to 270.0 (front view, 012.png) if extraction fails.
-    """
     try:
         ori_dir = os.path.join(args.root_dir, "ori")
         _, azimuth_deg = get_view_azimuth_from_ori(ori_dir)
@@ -99,17 +76,6 @@ def _get_azimuth_from_ori(args) -> float:
 
 
 def process_single_sample(args, pipeline=None, encoder=None, image_path=None):
-    """Run the edit / baseline pipeline for a single input image.
-
-    Args:
-        args: Namespace from `parse_args()`.
-        pipeline: A loaded TrellisImageTo3DPipeline instance; required.
-        encoder: Reserved parameter; loaded internally as needed.
-        image_path: Target condition image for this edit (RGBA or regular image).
-
-    Returns:
-        bool: Always returns True (exceptions are caught and printed).
-    """
     filename = os.path.basename(image_path)
     output_root = args.output_dir
     render_path = os.path.join(args.root_dir, "render")
@@ -155,7 +121,6 @@ def process_single_sample(args, pipeline=None, encoder=None, image_path=None):
             edit_name = os.path.splitext(filename)[0]
             mask_path = os.path.join(args.mask_dir, f"{edit_name}.glb")
             if not os.path.exists(mask_path):
-                # Fallback: find any .glb file in mask_dir
                 glb_files = [f for f in os.listdir(args.mask_dir) if f.endswith('.glb')]
                 if not glb_files:
                     raise FileNotFoundError(f"[mask] No .glb file found in {args.mask_dir}")
@@ -164,7 +129,6 @@ def process_single_sample(args, pipeline=None, encoder=None, image_path=None):
             mask_cache_dir = os.path.join(args.root_dir, ".mask_cache", edit_name)
             os.makedirs(mask_cache_dir, exist_ok=True)
             _normalize_mask(args, mask_path, mask_cache_dir)
-            # Blender outputs ply with the same stem as the input file
             mask_stem = os.path.splitext(os.path.basename(mask_path))[0]
             normalized_ply = os.path.join(mask_cache_dir, f"{mask_stem}.ply")
             raw_mask, latent_mask = _build_masks_from_mask_glb(args, normalized_ply)
@@ -182,10 +146,7 @@ def process_single_sample(args, pipeline=None, encoder=None, image_path=None):
                 edit_mask=edit_mask,
                 cfg_src_strength=args.cfg_src,
                 cfg_tar_strength=args.cfg_tar,
-                enable_step_viz=args.enable_step_viz,
-                use_guidance=(not args.no_guidance),
                 azimuth_deg=_get_azimuth_from_ori(args),
-                debug_guidance_viz=getattr(args, 'debug_guidance_viz', False),
             )
 
         else:

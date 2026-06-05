@@ -1,26 +1,3 @@
-#!/bin/bash
-# =============================================================
-# Batch preprocessing script (preprocess_batch.sh)
-# Function: Iterate over each model subfolder under a root directory and preprocess its model/
-# Input structure (must conform to):
-#   <BASE_DIR>/
-#       <model_name_1>/
-#           model/                  # Contains one of .glb/.obj/.ply/... 
-#       <model_name_2>/
-#           model/
-#       ...
-#
-# Preprocessing artifacts (auto-generated, used by downstream edit_batch.sh):
-#   <BASE_DIR>/<model_name>/render/          (mesh.ply, voxels.ply, feature.npz, transforms.json, multi-view images)
-#   <BASE_DIR>/<model_name>/edit_views/      (orthographic reference views for selecting edit viewpoint)
-#   <BASE_DIR>/<model_name>/ori/012.png      (reference image used by edit stage)
-#
-# Usage:
-#   bash preprocess_batch.sh <root_folder_path>
-# Example:
-#   bash preprocess_batch.sh /path/to/your/models
-# =============================================================
-
 set -u
 
 if [ $# -lt 1 ]; then

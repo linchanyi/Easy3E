@@ -19,7 +19,6 @@ last_t = t0
 
 
 def parse_args():
-    """Parse command-line arguments for the pipeline."""
     parser = argparse.ArgumentParser(description="TRELLIS 3D Reconstruction Pipeline")
 
     parser.add_argument("--input_dir", default="",
@@ -53,18 +52,11 @@ def parse_args():
                       help="Source condition CFG strength in FlowEdit (default 5.0)")
     parser.add_argument("--cfg_tar", type=float, default=5.0,
                       help="Target condition CFG strength in FlowEdit (default 5.0)")
-    parser.add_argument("--enable_step_viz", action="store_true",
-                      help="Export per-step FlowEdit visualization")
-    parser.add_argument("--no_guidance", action="store_true",
-                      help="Disable orthographic silhouette guidance")
-    parser.add_argument("--debug_guidance_viz", action="store_true",
-                      help="Save debug visualization of guidance alignment (silhouette vs edit mask)")
 
     return parser.parse_args()
 
 
 def _list_input_images(input_dir):
-    """List all supported images (png/jpg/jpeg) under input_dir."""
     return sorted([
         os.path.join(input_dir, fname)
         for fname in os.listdir(input_dir)
@@ -73,7 +65,6 @@ def _list_input_images(input_dir):
 
 
 def main():
-    """CLI entry point. Routes based on --preprocess / --mode."""
     args = parse_args()
 
     if args.preprocess:

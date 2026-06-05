@@ -1,14 +1,3 @@
-"""Preprocess stage for the Edit pipeline.
-
-Tasks performed in this stage (run once to prepare for subsequent edit stages):
-1. Render multi-view images + orthographic reference views via Blender
-2. Voxelize the mesh to 64^3
-3. Extract per-voxel patch-level features using DINOv2
-4. Encode ss_latent / slat_latent and save to disk for the edit stage
-
-Entry point: `preprocess_single_sample(args)`
-"""
-
 import json
 import os
 import shutil
@@ -36,7 +25,6 @@ from .utils import (
 
 def _render(args, obj_path, output_dir, num_views=150, original_image=None,
             edit_views_path=None):
-    """Render multi-view images and orthographic reference views via Blender."""
     os.makedirs(output_dir, exist_ok=True)
 
     model_path = find_model_path(obj_path)
@@ -81,11 +69,6 @@ def _render(args, obj_path, output_dir, num_views=150, original_image=None,
 
 
 def copy_camera_png(args, fname="012.png"):
-    """Copy {root}/edit_views/image_ori/{fname} to {root}/ori/{fname}.
-
-    The filename (e.g. '012.png') determines the editing view angle.
-    View index i corresponds to azimuth = i * 360/16 degrees.
-    """
     root = Path(args.root_dir)
     src = root / "edit_views" / "image_ori" / fname
     dst_dir = root / "ori"
@@ -98,7 +81,6 @@ def copy_camera_png(args, fname="012.png"):
     shutil.copy2(src, dst)
     print(f"[copy] {src} -> {dst}")
 
-    # Also extract view index for downstream use
     view_idx = int(os.path.splitext(fname)[0])
     azimuth_deg = view_idx * 360.0 / 16.0
     print(f"[copy] Selected view index={view_idx}, azimuth={azimuth_deg:.1f}°")
@@ -113,7 +95,6 @@ def extract_feature_single_object(
     image_size=518,
     batch_size=8,
 ):
-    """Extract patch-level voxel features for a single object using DINOv2."""
     dinov2_model = torch.hub.load('facebookresearch/dinov2', model_name)
     dinov2_model.eval().cuda()
 
@@ -188,13 +169,6 @@ def extract_feature_single_object(
 
 
 def preprocess_single_sample(args):
-    """Preprocessing entry point: convert a raw 3D model into all caches needed by the edit stage.
-
-    All artifacts are saved under `<args.root_dir>/`:
-        render/mesh.ply, render/feature.npz, render/transforms.json,
-        render/ss_latent.pt, render/slat_latent.pt,
-        edit_views/, ori/012.png
-    """
     image_path = args.original_image
     filename = os.path.basename(image_path)
     feature_path = os.path.join(args.root_dir, "feature")

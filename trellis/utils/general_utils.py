@@ -347,9 +347,6 @@ def _silhouette_from_sigma(
     - hard=True: forward hard threshold + straight-through estimator (backprop through soft S)
     Returns: [B,1,H,W]
     """
-    import torch
-    import torch.nn.functional as F
-
     # --- 1) Move "depth axis" to dim=2 -> [B,1,D,H,W]
     axis_to_dim = {'z': 2, 'y': 3, 'x': 4}
     da = axis_to_dim[depth_axis]
@@ -401,9 +398,7 @@ def _silhouette_from_sigma(
 def apply_orient_2d(img, flip_x=False, flip_y=False, rot90k=0, swap_xy=False):
     """img: [B,1,H,W]. Apply 2D orientation correction as needed; differentiable. rot90k ∈ {0,1,2,3}"""
     # Rotate 90*k
-    
     k = int(rot90k) % 4
-    k = 1
     if k == 1:  # +90°
         img = img.transpose(-2, -1).flip(-2)
     elif k == 2:  # 180°

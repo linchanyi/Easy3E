@@ -25,12 +25,6 @@ from ...utils.general_utils import (
 from ...utils.general_utils import grad_chain_diagnostics,blend_feats_ring1_outside
 from ...utils.general_utils import silhouette_at_azimuth, save_guidance_debug_viz
 class FlowEulerSampler(Sampler):
-    """
-    Generate samples from a flow-matching model using Euler sampling.
-
-    Args:
-        sigma_min: The minimum scale of noise in flow.
-    """
     def __init__(
         self,
         sigma_min: float,
@@ -73,24 +67,8 @@ class FlowEulerSampler(Sampler):
         cond: Optional[Any] = None,
         **kwargs
     ):
-        """
-        Sample x_{t-1} from the model using Euler method.
         
-        Args:
-            model: The model to sample from.
-            x_t: The [N x C x ...] tensor of noisy inputs at time t.
-            t: The current timestep.
-            t_prev: The previous timestep.
-            cond: conditional information.
-            **kwargs: Additional arguments for model inference.
-
-        Returns:
-            a dict containing the following
-            - 'pred_x_prev': x_{t-1}.
-            - 'pred_x_0': a prediction of x_0.
-        """
-       
-        pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs) ####change
+        pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
         pred_x_prev = x_t - (t - t_prev) * pred_v
      
         return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
@@ -114,349 +92,226 @@ class FlowEulerSampler(Sampler):
         else:
             return self.sample_ori(model,noise,cond,steps,rescale_t,verbose,**kwargs)
     
-    def _prep_noise_table(self,sample, steps, n_avg, seed):
-        import os, random, numpy as np, torch
-        device, dtype = sample.device, sample.dtype
-        random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-        if device.type == "cuda": torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        torch.use_deterministic_algorithms(True)
-        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+   
+    _FE_N_MIN        = 2     
+    _FE_N_AVG        = 4     
+    _FE_FEATHER      = 2     
+    _FE_GUARD        = 1    
+    _FE_GUID_START   = 6    
 
-        K = max(1, n_avg)
-        gen = torch.Generator(device=device).manual_seed(seed)
-        eps_table = [
-            torch.randn(sample.shape, generator=gen, device=device, dtype=dtype)
-            for _ in range(steps * K)
-        ]
+    _FE_ETA          = 0.1   
+    _FE_GAMMA        = 0.1   
+    _FE_BETA_NORM    = 1.0   
+    _FE_LAM_OUT      = 0.5   
+    _FE_LAM_IN       = 0.1   
 
-        # Antithetic sampling (variance reduction, works better when n_avg is even)
-        if K % 2 == 0:
-            for s in range(steps):
-                half = K // 2
-                for k in range(half, K):
-                    eps_table[s*K + k] = -eps_table[s*K + (k - half)]
-
-        # Noise for the first step of the tail segment
-        tail_eps = torch.randn(sample.shape, generator=gen, device=device, dtype=dtype)
-        return eps_table, tail_eps
+    _RP_BETA         = 0.8   
+    _RP_ANCHOR_EPS   = True  
+    _RP_INV_STEPS    = 4     
 
     @torch.no_grad()
     def sample_flowedit(
         self,
         model,
         noise,
-        cond: Optional[Any] = None,   # Default fallback only; overridden by cond_src / cond_tar
+        cond: Optional[Any] = None,
         steps: int = 25,
         rescale_t: float = 3.0,
         verbose: bool = True,
         **kwargs
-        ):
-        """
-        FlowEdit sampling (inversion-free), does not read/write latent or fuse features.
-        Required kwargs (all have defaults, pass as needed):
-        - cond_src, cond_tar: source/target conditions (defaults to cond)
-        - n_min=0, n_max=None, n_avg=4
-        - alpha_sched=lambda t: t, lock_sched=lambda t: 0.0
-        - mask=None (broadcastable with sample)
-        - src_latent=None (strongly recommended: clean source state; if not provided, uses a snapshot of current sample)
-        - use_same_noise=True
-        - forward_noise_fn=None  # default: (1-t)*x0 + t*eps
-        """
-        # ------ Read control parameters ------
-        cond_src = kwargs["ori_cond"]
-        cond_tar = cond
-
-        n_min = int(kwargs.get("n_min", 2))
-        n_max = kwargs.get("n_max", None)  # None = editable throughout all steps
-        n_avg = int(kwargs.get("n_avg", 4))
-        alpha_sched = kwargs.get("alpha_sched", lambda t: 1.0)     # Difference vector strength (small early, large later)
-        manual_mask = kwargs.get("mask", None)
-        feather = int(kwargs.get("feather", 2))
-        guard   = int(kwargs.get("guard", 1))
-        # Linear + lower bound, maintaining some strength in early/mid stages
-        lock_sched = lambda t: min(0.95, 0.40 + (1.0 - t)*0.45)
-        # t goes from 1→0: lock-back grows from ~0.40 to ~0.85 (max 0.95)
-
-
-        #soft_mask = make_soft_mask(mask)
+    ):
         
-        forward_noise_fn = kwargs.get("forward_noise_fn", None)
-
-        edit_mask_in = kwargs.get("edit_mask",None)
-        ortho_scale = float(kwargs.get("subject_width", 1.0))
-        
-        tx             = float(kwargs.get("tx", 0.0))
-        ty             = float(kwargs.get("ty", 0.0))
-        flip_y         = bool(kwargs.get("flip_y", False))
-
-        # Guidance switch: enabled by default; also compatible with legacy name use_ortho_guidance
-        use_guidance = bool(kwargs.get("use_guidance", kwargs.get("use_ortho_guidance", True)))
-        lambda0 = float(kwargs.get("lambda0", 1.0))
-
-        # Camera azimuth for guidance projection (default 270° = front view = 012.png)
-        azimuth_deg = float(kwargs.get("azimuth_deg", 270.0))
-        # Debug visualization switch for guidance alignment
-        debug_guidance_viz = bool(kwargs.get("debug_guidance_viz", False))
-        debug_viz_dir = kwargs.get("debug_viz_dir", None)
-
-        # CFG strength (src / tar decoupled, allows external override)
+        cond_src         = kwargs["ori_cond"]
+        cond_tar         = cond
+        manual_mask      = kwargs.get("mask", None)
         cfg_src_strength = float(kwargs.get("cfg_src_strength", 5.0))
         cfg_tar_strength = float(kwargs.get("cfg_tar_strength", 5.0))
+        use_guidance     = bool(kwargs.get("use_guidance", True))
+        azimuth_deg      = float(kwargs.get("azimuth_deg", 270.0))
+        debug_guid       = bool(kwargs.get("debug_guidance_viz", False))
+        debug_viz_dir    = kwargs.get("debug_viz_dir", None)
+        decode_voxel_fn  = kwargs.get("decode_voxel_fn", None)
 
-        decode_voxel_fn = kwargs.get("decode_voxel_fn", None)
+        lock_sched = lambda t: min(0.95, 0.40 + (1.0 - t) * 0.45)
 
+        def forward_noise(x0, t_scalar, eps):
+            s = 1e-5
+            tv = float(t_scalar)
+            return (1.0 - tv) * x0 + (s + (1 - s) * tv) * eps
 
-        # ------ Initialize state ------
-        sample = noise  # Note: FlowEdit does not do latent I/O or feature fusion; noise here is the original input
-        T_steps = steps
-        #eps_table, tail_eps = self._prep_noise_table(noise, steps=steps, n_avg=n_avg, seed=kwargs.get("seed", 20))
-        # Source reference state x_src0 (best to pass a clean latent/image; otherwise uses a copy of current sample)
+        def _mul_mask(v):
+            return v if combined_soft is None else v * combined_soft
+
+        sample = noise
         x_src0 = kwargs.get("src_latent", None)
         if x_src0 is None:
             x_src0 = sample.clone()
 
-        # Default forward noise function (Rectified Flow style)
-        if forward_noise_fn is None:
-            def forward_noise_fn(x0, t_scalar, eps):
-                # t_scalar ∈ [0,1]; keeps dtype/device consistent with x0
-                sigma_min = 1e-5 
-                t_val = float(t_scalar)
-                return (1.0 - t_val) * x0 + (sigma_min + (1 - sigma_min) * t_val) * eps
-        
-        # ------ Construct time grid (consistent with baseline) ------
         t_seq = np.linspace(1, 0, steps + 1)
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
         t_pairs = [(t_seq[i], t_seq[i + 1]) for i in range(steps)]
-        if n_max is None:
-            n_max = T_steps
 
-        # ------ Return container ------
-        edict = lambda d: type("edict", (object,), d)
-        ret = edict({
-        "samples": None, "pred_x_t": [], "pred_x_0": [],
-        "viz_grid_paths": [], "auto_masks": [], "mask_metrics": []
-        })  # FIX: add missing fields
+        _edict = lambda d: type("edict", (object,), d)
+        ret = _edict({
+            "samples": None, "pred_x_t": [], "pred_x_0": [],
+            "viz_grid_paths": [], "auto_masks": [], "mask_metrics": []
+        })
 
-
-        iterator = enumerate(t_pairs)
-        if verbose:
-            try:
-                from tqdm import tqdm
-                iterator = tqdm(iterator, total=len(t_pairs), desc="Sampling (FlowEdit)")
-            except Exception:
-                pass
-
-        manual_soft, manual_guard = (None, None)
+        combined_soft = None
         if manual_mask is not None:
-            manual_soft, manual_guard = build_soft_masks(manual_mask, sample, feather=feather, guard=guard)
-        # ------ Main loop ------
-        combined_soft  = manual_soft
+            combined_soft, _ = build_soft_masks(
+                manual_mask, sample,
+                feather=self._FE_FEATHER, guard=self._FE_GUARD
+            )
 
-        # Normalize edit_mask to device/shape
-        edit_mask = _to_mask_tensor(edit_mask_in, sample)  # [B?,1,H,W]
+        edit_mask = _to_mask_tensor(kwargs.get("edit_mask", None), sample)
         if edit_mask.shape[0] != sample.shape[0]:
             if edit_mask.shape[0] == 1:
                 edit_mask = edit_mask.expand(sample.shape[0], -1, -1, -1)
             else:
-                raise ValueError(f"edit_mask batch mismatch with sample: {edit_mask.shape[0]} vs {sample.shape[0]}")
+                raise ValueError(
+                    f"edit_mask batch mismatch with sample: {edit_mask.shape[0]} vs {sample.shape[0]}"
+                )
         H_mask, W_mask = int(edit_mask.shape[-2]), int(edit_mask.shape[-1])
 
-        for step_i, (t, t_prev) in iterator:
-            # Determine whether current step is in the "editable middle segment" or "tail target refinement"
-            can_edit    = (T_steps - step_i) <= n_max
-            tail_refine = (T_steps - step_i) <= n_min
-
-            if not can_edit:
-                continue
-
-            if not tail_refine:
-                # ========= Middle segment: difference vector field + n_avg averaging =========
-                V_delta_avg = torch.zeros_like(sample)
-                K = max(1, n_avg)
-                
-                
-                for k in range(K):
-                    # Same-noise differencing (recommended): src/tar share the same noise instance
-                    #eps = eps_table[step_i * K + k]
-                    eps = torch.randn_like(x_src0)
-                    # Construct z_t^src and z_t^tar
-                    zt_src = forward_noise_fn(x_src0, t, eps)
-                    
-                    # Keep source outside mask
-                    
-                    zt_src = apply_mask_blend(zt_src, x_src0, combined_soft)
-                    #zt_src = soft_mask*zt_src + (1-soft_mask)*x_src0
-                    zt_tar = sample + (zt_src - x_src0)
-
-                    # Velocity field (take pred_v)
-                    kwargs["cfg_strength"] = cfg_src_strength
-                    _x0s, _epss, v_src = self._get_model_prediction(model, zt_src, t, cond_src, **kwargs)
-                    kwargs["cfg_strength"] = cfg_tar_strength
-                    _x0t, _epst, v_tar = self._get_model_prediction(model, zt_tar, t, cond_tar, **kwargs)
-
-                    delta = (v_tar - v_src)
-
-                    
-
-                    V_delta_avg = V_delta_avg + delta / float(K)
-
-                
-                
-                V_delta_avg = V_delta_avg * combined_soft
-                # Euler step forward (same notation as baseline)
-                dt = (t - t_prev)
-                alpha = alpha_sched(float(t))
-                pred_x_prev = sample - dt * (alpha * V_delta_avg)
-
-                
-                
-
-                new_state = pred_x_prev
-                if step_i >=8 and use_guidance:
-                    try:
-                        with torch.enable_grad():
-                            x_t = new_state.detach().requires_grad_(True)
-                            sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
-                            tau  = 0.6 if float(t) > 0.5 else 0.5
-
-                            # Project silhouette at the specified azimuth angle
-                            sil_raw = silhouette_at_azimuth(sigma, azimuth_deg=azimuth_deg, tau=tau)
-                            sil_img = project_ortho_no_center(
-                                sil_raw, out_hw=(H_mask, W_mask),
-                                ortho_scale=ortho_scale, tx=tx, ty=ty, flip_y=flip_y
-                            )  # [B,1,H,W]
-
-                            # Debug visualization (save every 5 steps to avoid too many files)
-                            if debug_guidance_viz and debug_viz_dir and (step_i % 5 == 0):
-                                save_guidance_debug_viz(
-                                    sil_img, edit_mask, step_i, azimuth_deg, debug_viz_dir,
-                                    prefix="mid"
-                                )
-
-                            # Loss (can stack DT/contour loss later)
-                            L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
-                            g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
-
-                            a=_stat(g_latent,"g_latent")
-
-                            ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
-
-                            if use_guidance and (g_latent is not None):
-                                new_state = new_state - dt * (lambda0 * g_latent)
-                    except Exception as e:
-                        ret.mask_metrics.append({"step": int(step_i), "err": str(e)})
-
-                pred_x_prev = new_state
-
-                # Pull non-mask region back to source (optional)
-                lock = lock_sched(float(t))
-                if (manual_mask is not None) and (lock > 0):
-                    pred_x_prev = (1 - lock * (1 - manual_mask)) * pred_x_prev + (lock * (1 - manual_mask)) * x_src0
-
-                sample = pred_x_prev
-                ret.pred_x_t.append(pred_x_prev)
-                ret.pred_x_0.append(None)  # If x0 is needed, run an additional forward pass
-
-            else:
-                # ========= Tail segment: target refinement (SDEdit style, target condition only) =========
-                if (T_steps - step_i) == n_min:
-                    #eps = tail_eps
-                    eps = torch.randn_like(x_src0)
-                    xt_src = forward_noise_fn(x_src0, t, eps)
-                    xt_src = apply_mask_blend(xt_src, x_src0, combined_soft)
-                    xt_tar = sample + (xt_src - x_src0)
-                else:
-                    xt_tar = sample
-                kwargs["cfg_strength"] = cfg_tar_strength
-                pred_x0, pred_eps, v_tar = self._get_model_prediction(model, xt_tar, t, cond_tar, **kwargs)
-                if combined_soft is not None:  # FIX: guard against None
-                    v_tar = v_tar * combined_soft
-                dt = (t - t_prev)
-                pred_x_prev = xt_tar - dt * v_tar
-
-                new_state = pred_x_prev
-                if use_guidance :
-                    try:
-                        with torch.enable_grad():
-                            x_t = new_state.detach().requires_grad_(True)
-                            sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
-                            tau  = 0.6 if float(t) > 0.5 else 0.5
-
-                            # Project silhouette at the specified azimuth angle
-                            sil_raw = silhouette_at_azimuth(sigma, azimuth_deg=azimuth_deg, tau=tau)
-                            sil_img = project_ortho_no_center(
-                                sil_raw, out_hw=(H_mask, W_mask),
-                                ortho_scale=ortho_scale, tx=tx, ty=ty, flip_y=flip_y
-                            )  # [B,1,H,W]
-
-                            # Debug visualization
-                            if debug_guidance_viz and debug_viz_dir and (step_i % 5 == 0):
-                                save_guidance_debug_viz(
-                                    sil_img, edit_mask, step_i, azimuth_deg, debug_viz_dir,
-                                    prefix="tail"
-                                )
-
-                            # Loss
-                            L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
-                            g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
-
-                            ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
-
-                            if use_guidance and (g_latent is not None):
-                                new_state = new_state - dt * (lambda0 * g_latent)
-                    except Exception as e:
-                        ret.mask_metrics.append({"step": int(step_i), "err": str(e)})
-
-                pred_x_prev = new_state
-
-                # Pull non-mask region back to source (optional)
-                lock = lock_sched(float(t))
-                if (manual_mask is not None) and (lock > 0):
-                    pred_x_prev = (1 - lock * (1 - manual_mask)) * pred_x_prev + (lock * (1 - manual_mask)) * x_src0
-
-                sample = pred_x_prev
-                ret.pred_x_t.append(pred_x_prev)
-                ret.pred_x_0.append(pred_x0)
         
-        new_state = pred_x_prev
-        step_i = 25
-        if use_guidance:
+        from ...utils.general_utils import rotate_volume_z as _rot_vol_z
+
+        def _build_3D_mask(edit_mask_2d, sigma_perm_shape):
+            B, _, Y_dim, Z_dim, X_dim = sigma_perm_shape
+            m = F.interpolate(edit_mask_2d, size=(X_dim, Z_dim), mode='bilinear', align_corners=True)
+            m = m.flip(-2).transpose(-2, -1)
+            m = m.unsqueeze(2).expand(B, 1, Y_dim, Z_dim, X_dim)
+            return m.contiguous()
+
+        
+        def _guide(state, t_val, dt, step_i, prefix, v_norm_ref, xi_traj=None):
+            if not use_guidance:
+                return state
             try:
                 with torch.enable_grad():
-                    x_t = new_state.detach().requires_grad_(True)
-                    sigma = decode_voxel_fn(x_t)  # [B,1,D,H,W] (continuous)
-                    tau  = 0.6 if float(t) > 0.5 else 0.5
+                    x_t   = state.detach().requires_grad_(True)
+                    sigma = decode_voxel_fn(x_t)
+                    tau   = 0.6 if t_val > 0.5 else 0.5
 
-                    # Project silhouette at the specified azimuth angle
-                    sil_raw = silhouette_at_azimuth(sigma, azimuth_deg=azimuth_deg, tau=tau)
-                    sil_img = project_ortho_no_center(
-                        sil_raw, out_hw=(H_mask, W_mask),
-                        ortho_scale=ortho_scale, tx=tx, ty=ty, flip_y=flip_y
-                    )  # [B,1,H,W]
+                    delta_rad = float(np.radians(azimuth_deg - 270.0))
+                    rotated = sigma if abs((azimuth_deg - 270.0) % 360.0) < 1e-3 \
+                              else _rot_vol_z(sigma, delta_rad)
+                    sigma_perm = rotated.permute(0, 1, 3, 2, 4).contiguous()
 
-                    # Debug visualization (final step)
-                    if debug_guidance_viz and debug_viz_dir:
+                    M_3D = _build_3D_mask(edit_mask, sigma_perm.shape)
+
+                    s = sigma_perm / tau
+                    L_out = (F.softplus(s) * (1.0 - M_3D)).sum() \
+                            / ((1.0 - M_3D).sum().clamp(min=1.0))
+                    M_2D_ray = M_3D.amax(dim=2)
+                    lse_y    = torch.logsumexp(s, dim=2)
+                    L_in     = (F.softplus(-lse_y) * M_2D_ray).sum() \
+                               / (M_2D_ray.sum().clamp(min=1.0))
+
+                    L = self._FE_LAM_OUT * L_out + self._FE_LAM_IN * L_in
+                    g = torch.autograd.grad(L, x_t)[0]
+                    ret.mask_metrics.append({
+                        "step": int(step_i),
+                        "L_out": float(L_out.detach().cpu()),
+                        "L_in":  float(L_in.detach().cpu()),
+                    })
+
+                if debug_guid and debug_viz_dir is not None:
+                    with torch.no_grad():
+                        sil_raw = silhouette_at_azimuth(sigma.detach(), azimuth_deg=azimuth_deg, tau=tau)
+                        sil_img = project_ortho_no_center(sil_raw, out_hw=(H_mask, W_mask), ortho_scale=1.0)
                         save_guidance_debug_viz(
-                            sil_img, edit_mask, step_i, azimuth_deg, debug_viz_dir,
-                            prefix="final"
+                            sil_img, edit_mask, step_i, azimuth_deg,
+                            debug_viz_dir, prefix=prefix
                         )
 
-                    # Loss
-                    L_ortho = F.binary_cross_entropy(sil_img.clamp(1e-6, 1-1e-6), edit_mask)
-                    g_latent = torch.autograd.grad(L_ortho, x_t, retain_graph=False, create_graph=False)[0]
+                g = _mul_mask(g)
+                g_norm = g.norm() + 1e-8
+                scale  = self._FE_BETA_NORM * (v_norm_ref / g_norm)
+                tilde_g = scale * g
 
-                    ret.mask_metrics.append({"step": int(step_i), "L_ortho": float(L_ortho.detach().cpu())})
-
-                    if use_guidance and (g_latent is not None):
-                        if combined_soft is not None:
-                            g_latent = g_latent * combined_soft
-                        new_state = new_state - dt * (lambda0 * g_latent)
+                state = state - dt * (self._FE_ETA * tilde_g)
+                if xi_traj is not None:
+                    state = state - dt * (self._FE_GAMMA * _mul_mask(xi_traj))
             except Exception as e:
                 ret.mask_metrics.append({"step": int(step_i), "err": str(e)})
+            return state
 
-        sample = new_state
+        def _lock_back(x, t_val):
+            if manual_mask is None:
+                return x
+            lk = lock_sched(t_val)
+            if lk <= 0:
+                return x
+            keep = lk * (1 - manual_mask)
+            return (1 - keep) * x + keep * x_src0
+
+        iterator = enumerate(t_pairs)
+        if verbose:
+            try:
+                iterator = tqdm(iterator, total=len(t_pairs), desc="Sampling (FlowEdit)")
+            except Exception:
+                pass
+
+        for step_i, (t, t_prev) in iterator:
+            tail_refine = (steps - step_i) <= self._FE_N_MIN
+            dt = t - t_prev
+
+            if not tail_refine:
+                V = torch.zeros_like(sample)
+                last_zt_src = last_zt_tar = None
+                last_v_src  = last_v_tar  = None
+                for _ in range(self._FE_N_AVG):
+                    eps = torch.randn_like(x_src0)
+                    zt_src = apply_mask_blend(forward_noise(x_src0, t, eps), x_src0, combined_soft)
+                    zt_tar = sample + (zt_src - x_src0)
+
+                    kwargs["cfg_strength"] = cfg_src_strength
+                    _, _, v_src = self._get_model_prediction(model, zt_src, t, cond_src, **kwargs)
+                    kwargs["cfg_strength"] = cfg_tar_strength
+                    _, _, v_tar = self._get_model_prediction(model, zt_tar, t, cond_tar, **kwargs)
+
+                    V = V + (v_tar - v_src) / float(self._FE_N_AVG)
+                    last_zt_src, last_zt_tar, last_v_src, last_v_tar = zt_src, zt_tar, v_src, v_tar
+
+                V = _mul_mask(V)
+                x = sample - dt * V
+
+                if step_i >= self._FE_GUID_START:
+                    tv = float(t)
+                    x0_tgt = last_zt_tar - tv * last_v_tar
+                    x0_src = last_zt_src - tv * last_v_src
+                    xi_traj = x0_tgt - x0_src
+                    x = _guide(x, tv, dt, step_i, "mid",
+                               v_norm_ref=V.detach().norm() + 1e-8,
+                               xi_traj=xi_traj.detach())
+
+                sample = _lock_back(x, float(t))
+                ret.pred_x_t.append(sample)
+                ret.pred_x_0.append(None)
+
+            else:
+                if (steps - step_i) == self._FE_N_MIN:
+                    eps = torch.randn_like(x_src0)
+                    zt_src = apply_mask_blend(forward_noise(x_src0, t, eps), x_src0, combined_soft)
+                    xt_tar = sample + (zt_src - x_src0)
+                else:
+                    xt_tar = sample
+
+                kwargs["cfg_strength"] = cfg_tar_strength
+                pred_x0, _, v_tar = self._get_model_prediction(model, xt_tar, t, cond_tar, **kwargs)
+                v_tar = _mul_mask(v_tar)
+                x = xt_tar - dt * v_tar
+
+                x = _guide(x, float(t), dt, step_i, "tail",
+                           v_norm_ref=v_tar.detach().norm() + 1e-8,
+                           xi_traj=None)
+
+                sample = _lock_back(x, float(t))
+                ret.pred_x_t.append(sample)
+                ret.pred_x_0.append(pred_x0)
+
         ret.samples = sample
         return ret
 
@@ -471,9 +326,6 @@ class FlowEulerSampler(Sampler):
         verbose: bool = True,
         **kwargs
     ):
-        """
-        Baseline pure forward generation: sample from noise all the way to x_0, no repainting/inversion involved.
-        """
         sample = noise
         t_seq = np.linspace(1, 0, steps + 1)
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
@@ -503,26 +355,24 @@ class FlowEulerSampler(Sampler):
         verbose: bool = True,
         **kwargs
     ):
-        """
-        SLAT Repainting sampling (inversion-free).
-
-        Formula (for each timestep t -> t_prev):
-            z_edit  = z_k + Δt * v_θ(z_k, t_k | cond_tar)
-            z_src_t = (sigma_min + (1 - sigma_min) * t_prev) * eps + (1 - t_prev) * x_src
-            z_{k-1} = M ⊙ z_edit + (1 - M) ⊙ z_src_t
-
-        Required kwargs:
-            - x_src: Source sample latent ("clean" x_0). SparseTensor or Tensor, shape aligned with noise.
-            - mask: M, broadcastable with x_src/sample. Value 1 = editable region, 0 = keep source.
-                    - Tensor (dense): shape broadcastable to sample
-                    - SparseTensor: per-row (feats) 0/1 mask, aligned with sample.feats
-                    - None: all editable (degenerates to normal generation)
-            - stage: "sparse" | "slat", determines the specific branch for masking/noising
-        """
+      
         sample = noise
         x_src = kwargs.get("x_src", None)
         mask = kwargs.get("mask", None)
         stage = kwargs.get("stage", "sparse")
+        repaint_beta       = max(0.0, min(1.0, float(self._RP_BETA)))
+        repaint_anchor_eps = bool(self._RP_ANCHOR_EPS)
+        repaint_inv_steps  = max(0, min(int(self._RP_INV_STEPS), steps))
+        cond_src           = kwargs.get("ori_cond", None)
+        if repaint_inv_steps > 0 and cond_src is None:
+            repaint_inv_steps = 0
+
+        eps_anchor = None
+        if repaint_anchor_eps and (x_src is not None):
+            if hasattr(x_src, "feats") and hasattr(x_src, "coords"):
+                eps_anchor = torch.randn_like(x_src.feats)
+            else:
+                eps_anchor = torch.randn_like(x_src)
 
         t_seq = np.linspace(1, 0, steps + 1)
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
@@ -530,75 +380,152 @@ class FlowEulerSampler(Sampler):
 
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
 
-        for t, t_prev in tqdm(t_pairs, desc="Sampling (Repaint)", disable=not verbose):
+        for step_i, (t, t_prev) in enumerate(
+            tqdm(t_pairs, desc="Sampling (Repaint)", disable=not verbose)
+        ):
             kwargs["t_sign"] = t
             kwargs["t_1"] = t
 
-            # 1) One Euler step with target condition to get z_edit
             out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
             z_edit = out.pred_x_prev
 
-            # 2) Non-editable region: forward analytical noising of source to get z_src_t_prev
-            if x_src is not None and mask is not None:
-                z_src_t_prev = self._forward_diffuse_src(x_src, t_prev, stage=stage)
-                z_next = self._mask_blend(z_edit, z_src_t_prev, mask, stage=stage)
+            if x_src is not None and mask is not None and repaint_beta > 0.0:
+                if step_i < repaint_inv_steps:
+                    _drop = {
+                        "x_src", "mask", "stage", "ori_cond",
+                        "repaint_beta", "repaint_anchor_eps",
+                        "repaint_inv_steps",
+                    }
+                    inner_kwargs = {k: v for k, v in kwargs.items() if k not in _drop}
+                    x0_consistent = self._tweedie_self_consistent_x0(
+                        model, x_src, t, cond_src,
+                        eps_anchor=eps_anchor, stage=stage, **inner_kwargs,
+                    )
+                    z_src_t_prev = self._forward_diffuse_src(
+                        x0_consistent, t_prev,
+                        stage=stage, eps_override=eps_anchor,
+                    )
+                else:
+                    z_src_t_prev = self._forward_diffuse_src(
+                        x_src, t_prev,
+                        stage=stage, eps_override=eps_anchor,
+                    )
+
+                z_next = self._mask_blend(
+                    z_edit, z_src_t_prev, mask,
+                    stage=stage, beta=repaint_beta,
+                )
             else:
-                # No source/mask: degenerates to normal generation
                 z_next = z_edit
 
             sample = z_next
             ret.pred_x_t.append(z_next)
             ret.pred_x_0.append(out.pred_x_0)
 
+        if x_src is not None and mask is not None:
+            sample = self._mask_overwrite_outside(sample, x_src, mask, stage=stage)
+
         ret.samples = sample
         return ret
 
-    def _forward_diffuse_src(self, x_src, t_prev, stage="sparse"):
-        """
-        Forward analytical noising of source sample (rectified flow style):
-            z_t = (1 - t) * x_src + (sigma_min + (1 - sigma_min) * t) * eps
-        Returns an object of the same type as x_src (Tensor or SparseTensor).
-        """
+    def _tweedie_self_consistent_x0(
+        self, model, x_src, t, cond_src, eps_anchor=None, stage="sparse", **kwargs
+    ):
+        
+        z_src_naive = self._forward_diffuse_src(
+            x_src, t, stage=stage, eps_override=eps_anchor,
+        )
+        _, _, v_src = self._get_model_prediction(model, z_src_naive, t, cond_src, **kwargs)
+        tv = float(t)
+        if hasattr(z_src_naive, "feats") and hasattr(z_src_naive, "coords"):
+            x0_feats = z_src_naive.feats - tv * v_src.feats
+            return z_src_naive.replace(feats=x0_feats)
+        return z_src_naive - tv * v_src
+
+    def _forward_diffuse_src(self, x_src, t_prev, stage="sparse", eps_override=None):
+       
         t_val = float(t_prev)
         scale_src = 1.0 - t_val
         scale_eps = self.sigma_min + (1.0 - self.sigma_min) * t_val
 
-        # SparseTensor: add noise to feats, keep coords unchanged
         if hasattr(x_src, "feats") and hasattr(x_src, "coords"):
-            eps = torch.randn_like(x_src.feats)
+            eps = eps_override if eps_override is not None else torch.randn_like(x_src.feats)
             new_feats = scale_src * x_src.feats + scale_eps * eps
             return x_src.replace(feats=new_feats)
 
-        # Dense Tensor
-        eps = torch.randn_like(x_src)
+        eps = eps_override if eps_override is not None else torch.randn_like(x_src)
         return scale_src * x_src + scale_eps * eps
 
-    def _mask_blend(self, z_edit, z_src_t, mask, stage="sparse"):
-        """
-        Mask blending: z = M * z_edit + (1 - M) * z_src_t
-        - stage="sparse": dense Tensor, mask broadcastable with z_edit
-        - stage="slat": SparseTensor. Assumes z_edit and z_src_t have aligned coordinates (repaint requirement),
-                        mask is a per-row 0/1 scalar, or 3D raw_mask pre-converted to per-row mask by caller.
-        """
-        # Dense Tensor branch
+    def _mask_blend(self, z_edit, z_src_t, mask, stage="sparse", beta: float = 1.0):
+        
         if not (hasattr(z_edit, "feats") and hasattr(z_edit, "coords")):
             m = mask
             if not torch.is_tensor(m):
                 m = torch.as_tensor(m, device=z_edit.device, dtype=z_edit.dtype)
             else:
                 m = m.to(device=z_edit.device, dtype=z_edit.dtype)
-            return m * z_edit + (1.0 - m) * z_src_t
+            return z_edit + (1.0 - m) * beta * (z_src_t - z_edit)
 
-        # SparseTensor branch: use blend_feats_ring1_outside_rawmask, compatible with project's existing mask format
-        # mask here is expected to be raw_mask of shape [B,1,64,64,64]
-        alpha = 0.0
-        return blend_feats_ring1_outside_rawmask(z_edit, z_src_t, mask, alpha=alpha)
+        if beta >= 1.0 - 1e-6:
+            alpha = 0.0
+            return blend_feats_ring1_outside_rawmask(z_edit, z_src_t, mask, alpha=alpha)
+
+        device = z_edit.feats.device
+        coords_e = z_edit.coords.to(device).long()
+        coords_s = z_src_t.coords.to(device).long()
+        m_grid = mask.to(device)
+        if m_grid.dtype != torch.bool:
+            m_grid = m_grid > 0
+        b_e, x_e, y_e, z_e = coords_e.unbind(dim=1)
+        is_inside = m_grid[b_e, 0, x_e, y_e, z_e]
+
+        ori_map = {tuple(c.tolist()): i for i, c in enumerate(coords_s)}
+
+        new_feats = z_edit.feats.clone()
+        for i in range(coords_e.size(0)):
+            if bool(is_inside[i]):
+                continue
+            j = ori_map.get(tuple(coords_e[i].tolist()))
+            if j is None:
+                continue
+            new_feats[i] = beta * z_src_t.feats[j].to(new_feats.dtype) \
+                         + (1.0 - beta) * new_feats[i]
+        return z_edit.replace(feats=new_feats)
+
+    def _mask_overwrite_outside(self, sample, x_src, mask, stage="sparse"):
+       
+        if not (hasattr(sample, "feats") and hasattr(sample, "coords")):
+            m = mask
+            if not torch.is_tensor(m):
+                m = torch.as_tensor(m, device=sample.device, dtype=sample.dtype)
+            else:
+                m = m.to(device=sample.device, dtype=sample.dtype)
+            return m * sample + (1.0 - m) * x_src
+
+        
+        device = sample.feats.device
+        coords_s = sample.coords.to(device).long()
+        coords_o = x_src.coords.to(device).long()
+        m_grid = mask.to(device)
+        if m_grid.dtype != torch.bool:
+            m_grid = m_grid > 0
+        b_s, x_s, y_s, z_s = coords_s.unbind(dim=1)
+        is_inside = m_grid[b_s, 0, x_s, y_s, z_s]
+
+        ori_map = {tuple(c.tolist()): i for i, c in enumerate(coords_o)}
+
+        new_feats = sample.feats.clone()
+        for i in range(coords_s.size(0)):
+            if bool(is_inside[i]):
+                continue
+            j = ori_map.get(tuple(coords_s[i].tolist()))
+            if j is None:
+                continue
+            new_feats[i] = x_src.feats[j].to(new_feats.dtype)
+        return sample.replace(feats=new_feats)
 
 
 class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
-    """
-    Generate samples from a flow-matching model using Euler sampling with classifier-free guidance.
-    """
     @torch.no_grad()
     def sample(
         self,
@@ -612,33 +539,10 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
         verbose: bool = True,
         **kwargs
     ):
-        """
-        Generate samples from the model using Euler method.
-        
-        Args:
-            model: The model to sample from.
-            noise: The initial noise tensor.
-            cond: conditional information.
-            neg_cond: negative conditional information.
-            steps: The number of steps to sample.
-            rescale_t: The rescale factor for t.
-            cfg_strength: The strength of classifier-free guidance.
-            verbose: If True, show a progress bar.
-            **kwargs: Additional arguments for model_inference.
-
-        Returns:
-            a dict containing the following
-            - 'samples': the model samples.
-            - 'pred_x_t': a list of prediction of x_t.
-            - 'pred_x_0': a list of prediction of x_0.
-        """
         return super().sample(model, noise, cond, steps, rescale_t, verbose, neg_cond=neg_cond, cfg_strength=cfg_strength, **kwargs)
 
 
 class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSampler):
-    """
-    Generate samples from a flow-matching model using Euler sampling with classifier-free guidance and interval.
-    """
     @torch.no_grad()
     def sample(
         self,
@@ -652,26 +556,5 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
         cfg_interval: Tuple[float, float] = (0.0, 1.0),
         verbose: bool = True,
         **kwargs
-    ): ###change
-        """
-        Generate samples from the model using Euler method.
-        
-        Args:
-            model: The model to sample from.
-            noise: The initial noise tensor.
-            cond: conditional information.
-            neg_cond: negative conditional information.
-            steps: The number of steps to sample.
-            rescale_t: The rescale factor for t.
-            cfg_strength: The strength of classifier-free guidance.
-            cfg_interval: The interval for classifier-free guidance.
-            verbose: If True, show a progress bar.
-            **kwargs: Additional arguments for model_inference.
-
-        Returns:
-            a dict containing the following
-            - 'samples': the model samples.
-            - 'pred_x_t': a list of prediction of x_t.
-            - 'pred_x_0': a list of prediction of x_0.
-        """
+    ):
         return super().sample(model, noise, cond, steps, rescale_t, verbose, neg_cond=neg_cond, cfg_strength=cfg_strength, cfg_interval=cfg_interval, **kwargs)

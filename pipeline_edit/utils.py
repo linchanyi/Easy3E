@@ -1,10 +1,3 @@
-"""Shared utilities for the Edit pipeline.
-
-This module provides low-level helpers used by both the preprocess and edit stages:
-Blender invocation, geometry/mask construction, voxelization, SLAT latent encoding,
-model loading, and visualization.
-"""
-
 import os
 import json
 import subprocess
@@ -35,14 +28,6 @@ BLENDER_SCRIPTS_DIR = os.path.join(_REPO_ROOT, 'blender')
 
 
 def _run_blender_script(script_name, script_args, *, background=True, check=False):
-    """Execute a Blender script in headless mode.
-
-    Args:
-        script_name: Script filename under the blender/ directory.
-        script_args: Arguments passed to the script (placed after `--`).
-        background: Whether to run in -b headless mode (default True).
-        check: Whether to raise on failure (default False).
-    """
     script_path = os.path.join(BLENDER_SCRIPTS_DIR, script_name)
     cmd = [BLENDER_PATH]
     if background:
@@ -70,7 +55,6 @@ def _run_blender_script(script_name, script_args, *, background=True, check=Fals
 
 
 def print_time_cost(start_time, stage_name):
-    """Print elapsed time since start_time for the given stage."""
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     end_time = time.time()
@@ -80,15 +64,6 @@ def print_time_cost(start_time, stage_name):
 
 
 def build_latent_mask_from_mesh_regions(mask_boxes, latent_shape=(16, 16, 16), device="cuda") -> torch.Tensor:
-    """Union multiple boxes on a 64^3 mask, downsample to latent_shape, and expand to 8 channels.
-
-    Args:
-        mask_boxes: List of boxes, each box = [[x0,x1],[y0,y1],[z0,z1]]
-
-    Returns:
-        latent_mask: [1, 8, D', H', W'] (float 0/1)
-        raw_mask64:  [1, 1, 64, 64, 64] (float 0/1)
-    """
     raw_mask64 = torch.zeros((1, 1, 64, 64, 64), dtype=torch.float32, device=device)
     for box in mask_boxes:
         (x0, x1), (y0, y1), (z0, z1) = box
@@ -101,7 +76,6 @@ def build_latent_mask_from_mesh_regions(mask_boxes, latent_shape=(16, 16, 16), d
 
 
 def downsample_voxel_mask(mask: torch.Tensor, target_shape=(16, 16, 16)) -> torch.Tensor:
-    """Downsample a 3D voxel mask [B,1,D,H,W] to target_shape via trilinear interpolation."""
     if mask.dtype != torch.float32:
         mask = mask.float()
     downsampled_mask = F.interpolate(mask, size=target_shape, mode='trilinear', align_corners=False)
@@ -109,7 +83,6 @@ def downsample_voxel_mask(mask: torch.Tensor, target_shape=(16, 16, 16)) -> torc
 
 
 def find_model_path(folder: str) -> str:
-    """Find the first supported 3D model file in the given folder (non-recursive)."""
     exts = ('.obj', '.glb', '.gltf', '.fbx', '.ply', '.stl', '.usd', '.usdz', '.dae', '.vrm', '.blend')
     p = Path(folder)
     for ext in exts:
@@ -120,7 +93,6 @@ def find_model_path(folder: str) -> str:
 
 
 def _normalize_mask(args, mask_path, output_dir):
-    """Normalize mask.glb to the same coordinate system as the main mesh."""
     _run_blender_script(
         'render.py',
         [
@@ -137,9 +109,6 @@ def _normalize_mask(args, mask_path, output_dir):
 
 
 def _solid_mask_via_sdf(mesh_legacy: o3d.geometry.TriangleMesh, res: int = 64) -> torch.Tensor:
-    """Compute solid mask [1,1,res,res,res] via SDF sampling on a res^3 grid.
-    World coordinates assumed in [-0.5, 0.5].
-    """
     tmesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh_legacy)
     scene = o3d.t.geometry.RaycastingScene()
     _ = scene.add_triangles(tmesh)
@@ -157,14 +126,6 @@ def _solid_mask_via_sdf(mesh_legacy: o3d.geometry.TriangleMesh, res: int = 64) -
 
 
 def _fill_solid_from_surface(surface_bool: np.ndarray) -> np.ndarray:
-    """Infer solid voxels from surface voxels via 6-connected exterior flood-fill.
-
-    Args:
-        surface_bool: [res,res,res], True = surface occupied
-
-    Returns:
-        solid_bool: [res,res,res], True = solid (including surface)
-    """
     res = surface_bool.shape[0]
     occ = surface_bool.astype(bool)
     visited = np.zeros_like(occ, dtype=bool)
@@ -194,7 +155,6 @@ def _fill_solid_from_surface(surface_bool: np.ndarray) -> np.ndarray:
 
 
 def _solid_mask_via_floodfill(mesh_legacy: o3d.geometry.TriangleMesh, res: int = 64) -> torch.Tensor:
-    """Fallback: surface voxelization + exterior flood-fill to get solid mask [1,1,res,res,res]."""
     surf_idx, _ = voxelize(mesh_legacy)
     surf_idx_np = surf_idx.detach().cpu().numpy().astype(np.int64)
 
@@ -207,7 +167,6 @@ def _solid_mask_via_floodfill(mesh_legacy: o3d.geometry.TriangleMesh, res: int =
 
 
 def _build_masks_from_mask_glb(args, mask_glb_path, res: int = 64):
-    """Generate raw_mask64 [1,1,64,64,64] and latent_mask [1,8,16,16,16] from a mask mesh file."""
     if not os.path.exists(mask_glb_path):
         raise FileNotFoundError(f"[mask] Not found mask glb: {mask_glb_path}")
 
@@ -233,7 +192,6 @@ def _build_masks_from_mask_glb(args, mask_glb_path, res: int = 64):
 
 
 def _orthographic_projections_64(grid_64):
-    """Compute orthographic max-projections of a 64^3 voxel grid, returning front/back/left/right views."""
     assert grid_64.ndim == 5 and grid_64.shape[2:] == (64, 64, 64)
 
     front = grid_64.max(dim=4).values[0, 0].detach().float().cpu().numpy()
@@ -248,7 +206,6 @@ def _orthographic_projections_64(grid_64):
 
 
 def visualize_voxel_and_mask(args, raw_mask64=None, save_dir=None):
-    """Generate four-view overlay visualization (orthographic projection): object voxels vs mask voxels."""
     render_path = os.path.join(args.root_dir, "render")
     mesh_path = os.path.join(render_path, "mesh.ply")
     save_dir = save_dir or os.path.join(render_path, "viz_mask")
@@ -294,12 +251,6 @@ def visualize_voxel_and_mask(args, raw_mask64=None, save_dir=None):
 
 
 def voxelize(mesh: o3d.geometry.TriangleMesh, voxels_path=None) -> torch.Tensor:
-    """Voxelize a mesh onto a 64^3 regular grid (world box [-0.5, 0.5]).
-
-    Returns:
-        indices:  [M, 3] int CUDA, occupied voxel coordinates, range [0, 63].
-        positions:[M, 3] float CUDA, voxel center positions, range [-0.5, 0.5].
-    """
     vertices = np.asarray(mesh.vertices)
     vertices = np.clip(vertices, -0.5 + 1e-6, 0.5 - 1e-6)
     mesh.vertices = o3d.utility.Vector3dVector(vertices)
@@ -313,7 +264,6 @@ def voxelize(mesh: o3d.geometry.TriangleMesh, voxels_path=None) -> torch.Tensor:
 
 
 def get_voxels(coords):
-    """Convert integer voxel coordinates [M, 3] to occupancy tensor [1, 64, 64, 64]."""
     coords = coords.int().contiguous()
     ss = torch.zeros(1, 64, 64, 64, dtype=torch.long, device=coords.device)
     ss[:, coords[:, 0], coords[:, 1], coords[:, 2]] = 1
@@ -324,15 +274,6 @@ def encode_slat_latent_from_feature_tensor(
     feature_npz_path: str,
     enc_pretrained_path: str
 ) -> torch.Tensor:
-    """Encode SLAT latent from feature.npz using the given encoder weights.
-
-    Args:
-        feature_npz_path: Path to npz with patchtokens and indices.
-        enc_pretrained_path: Path to encoder model weights.
-
-    Returns:
-        latent: Encoded SparseTensor.
-    """
     encoder1 = models.from_pretrained(enc_pretrained_path).eval().cuda()
 
     data = np.load(feature_npz_path)
@@ -360,7 +301,6 @@ def encode_slat_latent_from_feature_tensor(
 
 
 def load_encoder(args):
-    """Load the SS encoder in inference mode."""
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_gpu else "cpu")
     encoder_path = f"{args.checkpoint}/ckpts/{args.encoder_name}"
     encoder = models.from_pretrained(encoder_path).eval().to(device)
@@ -368,14 +308,12 @@ def load_encoder(args):
 
 
 def load_pipeline(args):
-    """Load the TrellisImageTo3DPipeline onto GPU."""
     pipeline = TrellisImageTo3DPipeline.from_pretrained(args.checkpoint)
     pipeline.cuda()
     return pipeline
 
 
 def initialize_models(args):
-    """Initialize both encoder and pipeline."""
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_gpu else "cpu")
 
     encoder_path = f"{args.checkpoint}/ckpts/{args.encoder_name}"

@@ -1,16 +1,35 @@
-# Easy3E: Easy 3D Editing via FlowEdit 🎉 (Accepted to CVPR 2026!)
+<div align="center">
 
-<p align="center">
-  <img src="assets/teaser.png" alt="Easy3E Teaser" width="90%">
-</p>
+# Easy3E: Easy3E: Feed-Forward 3D Asset Editing via Rectified Voxel Flow
 
-<p align="center">
-  <b>Given a source 3D model, a condition image, and a 3D mask, Easy3E produces a locally edited 3D asset.</b>
-</p>
+<h3>CVPR 2026</h3>
+
+<small>  Shimin Hu &nbsp;&nbsp; · &nbsp;&nbsp; Yuanyi Wei &nbsp;&nbsp; · &nbsp;&nbsp; Fei Zha   &nbsp;&nbsp; · &nbsp;&nbsp;   [Yudong Guo](https://yudongguo.github.io/)   &nbsp;&nbsp; · &nbsp;&nbsp;  [Juyong Zhang](http://staff.ustc.edu.cn/~juyong/)
+
+University of Science and Technology of China
+
+</div>
+
+<div align="center">
+  <a href="https://ustc3dv.github.io/Easy3E/"><img src="https://img.shields.io/badge/Project%20Page-333399.svg?logo=googlehome" height="22px"></a>
+  <a href="https://arxiv.org/pdf/2602.21499"><img src="https://img.shields.io/badge/ArXiv-b5212f.svg?logo=arxiv" height="22px"></a>
+  <a href="https://github.com/linchanyi/Easy3E/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" height="22px"></a>
+</div>
+
+<div align="center">
+  <img src="assets/teaser.png" alt="Easy3E teaser" width="100%">
+</div>
 
 ---
 
-**Easy3E** is a 3D model editing pipeline built on top of [TRELLIS](https://github.com/Microsoft/TRELLIS). It enables localized, mask-guided editing of 3D assets using a two-stage workflow: **preprocess** → **edit**. Given a source 3D model, a user-painted condition image, and a 3D mask indicating the edit region, Easy3E produces an edited 3D model (`.glb`) with the desired modifications applied only within the masked area.
+**Easy3E** is a feed-forward 3D editing framework, designed to modify 3D models from a single editing view. It introduces **Voxel FlowEdit** in sparse voxel latent space for globally consistent 3D deformation, and a **normal-guided single-to-multi-view generation** module to restore high-fidelity appearance details.
+
+## 🗓️ Release Plan
+
+| Stage | Component | Status |
+| :--- | :--- | :---: |
+| 1 | Geometry editing | ✅ Released |
+| 2 | Texture refinement (normal-guided single-to-multi-view generation) | 🚧 Coming soon |
 
 ## 📋 Requirements
 
@@ -18,23 +37,6 @@
 - **GPU**: NVIDIA GPU with ≥24GB VRAM (A100/A6000 recommended)
 - **CUDA**: 11.8+
 - **Python**: 3.10+
-- **Blender**: 4.0.0 (for rendering; see installation below)
-
-### Python Dependencies
-
-```
-torch >= 2.1.0
-torchvision
-open3d
-numpy
-Pillow
-einops
-tqdm
-spconv-cu118  # or matching CUDA version
-safetensors
-easydict
-utils3d
-```
 
 ## 🚀 Installation
 
@@ -45,169 +47,108 @@ git clone https://github.com/linchanyi/Easy3E.git
 cd Easy3E
 ```
 
-### 2. Create conda environment
+### 2. Python environment
+
+Easy3E shares the same Python environment as [TRELLIS](https://github.com/microsoft/TRELLIS). Please follow the official TRELLIS installation guide to set up PyTorch, `spconv`, `xformers`, `flash-attn`, `vox2seq`, `kaolin`, `nvdiffrast`, etc.
 
 ```bash
-conda create -n easy3e python=3.10 -y
-conda activate easy3e
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip install open3d numpy Pillow einops tqdm spconv-cu118 safetensors easydict utils3d
+# Follow https://github.com/microsoft/TRELLIS for the full setup
+git clone --recurse-submodules https://github.com/microsoft/TRELLIS.git
+# then run TRELLIS's setup.sh in the conda env you plan to use for Easy3E
 ```
 
-### 3. Build CUDA extensions
+
+
+### 3. Blender (placed under `tmp/`)
+
+Easy3E renders multi-view images with Blender 4.0.0. By default the code looks for the executable at `tmp/blender-4.0.0-linux-x64/blender` (under the repo root). Just download and extract it into `tmp/`:
 
 ```bash
-cd extensions/vox2seq
-pip install .
-cd ../..
-```
-
-### 4. Install Blender 4.0.0
-
-```bash
-mkdir -p tmp && cd tmp
+mkdir -p tmp
+cd tmp
 wget https://download.blender.org/release/Blender4.0/blender-4.0.0-linux-x64.tar.xz
 tar -xf blender-4.0.0-linux-x64.tar.xz
 cd ..
 ```
 
-Or set the `BLENDER_PATH` environment variable to point to your existing Blender installation:
+After this, you should have:
+
+```
+Easy3E/tmp/blender-4.0.0-linux-x64/blender
+```
+
+If you want to use a Blender at a different location, set the `BLENDER_PATH` environment variable to its absolute path.
+
+### 4. Download the TRELLIS checkpoint
+
+We use the `TRELLIS-image-large` weights. Download them into `checkpoint/`:
 
 ```bash
-export BLENDER_PATH=/path/to/blender
+mkdir -p checkpoint
+# Option A: huggingface-cli
+huggingface-cli download microsoft/TRELLIS-image-large \
+    --local-dir checkpoint/TRELLIS-image-large
+
+# Option B: git lfs
+git lfs install
+git clone https://huggingface.co/microsoft/TRELLIS-image-large \
+    checkpoint/TRELLIS-image-large
 ```
 
-## 📁 Directory Structure
-
-```
-Easy3E/
-├── inference.py              # Main CLI entry point
-├── inference.sh              # Single-case edit script (example)
-├── preprocess_batch.sh       # Batch preprocessing script
-├── run.sh                    # Quick-start wrapper
-├── pipeline_edit/            # Core pipeline package
-│   ├── __init__.py
-│   ├── edit.py               # Edit / baseline stage
-│   ├── preprocess.py         # Preprocessing stage
-│   └── utils.py              # Shared utilities
-├── blender/                  # Blender rendering scripts
-│   └── render.py             # Unified rendering script (multi-task)
-├── trellis/                  # TRELLIS model library
-├── extensions/               # CUDA extensions (vox2seq)
-├── configs/                  # Model configuration files
-├── checkpoint/               # Pretrained model weights
-└── tmp/                      # Blender installation (not tracked by git)
-```
-
-### Data Directory Layout (per case)
-
-```
-<case_root>/
-├── model/                    # Source 3D model (.glb / .obj / .ply)
-├── render/                   # [Auto-generated] Preprocess artifacts
-│   ├── mesh.ply              #   Normalized triangle mesh
-│   ├── feature.npz           #   Per-voxel DINOv2 features
-│   ├── transforms.json       #   Multi-view camera parameters
-│   ├── ss_latent.pt          #   Cached SS encoder latent
-│   └── slat_latent.pt        #   Cached SLAT encoder latent
-├── edit_views/               # [Auto-generated] Orthographic reference views (16 images)
-├── ori/012.png               # [Auto-generated] Reference image for edit stage
-├── cond/                     # User-provided edit condition images (RGBA)
-│   └── <edit_name>.png       #   Alpha channel = edit mask
-├── mask/                     # User-provided 3D edit region masks
-│   └── <edit_name>.glb       #   Must match cond filename
-└── output/                   # [Auto-generated] Edit results
-    └── <edit_name>.glb       #   Final edited 3D model
-```
 
 ## 🔧 Usage
 
-### Step 1: Preprocessing (run once per model)
+We organize data per case. Pick any directory as the example root (e.g. `../example/`), and put each case in a subfolder named by its ID (`girl/`, `tiger/`, ...). 
 
-Preprocess a single model:
+### Step 1: Preprocess
 
-```bash
-python inference.py \
-  --preprocess \
-  --root_dir ./examples/tiger \
-  --obj_path ./examples/tiger/model \
-  --original_image ./examples/tiger/ori/012.png
+Put the source 3D model into `<case>/model/`. Supported formats: `.glb` / `.obj` / `.ply` / `.gltf` / `.fbx` / etc.
+
+```
+../example/girl/
+└── model/
+    └── girl.glb
 ```
 
-Batch preprocess multiple models:
+Run preprocessing on a single case:
 
 ```bash
-bash preprocess_batch.sh /path/to/your/models
+python inference.py --preprocess \
+    --root_dir ../example/girl \
+    --obj_path ../example/girl/model
 ```
 
-### Step 2: Editing
-
-Using the shell script (recommended):
+Or batch-preprocess every case under an example root (each subfolder must contain a `model/`):
 
 ```bash
-# Edit inference.sh: set ID and BASE to your case
+bash preprocess_batch.sh ../example
+```
+
+### Step 2: Edit
+
+Before editing, add two folders to the same case:
+
+- `<case>/cond/<edit_name>.png` — condition image of the edit
+- `<case>/mask/<edit_name>.glb` — 3D mask mesh marking the editable region (same basename as the cond image)
+
+```
+../example/girl/
+├── model/         # source model
+├── cond/          # edit condition images, e.g. edit1.png
+└── mask/          # 3D mask meshes,        e.g. edit1.glb
+```
+
+Edit `ID` / `BASE` in [`inference.sh`](./inference.sh) to point to your case, then run:
+
+```bash
 bash inference.sh
 ```
 
-Using Python directly:
-
-```bash
-python inference.py \
-  --input_dir ./examples/tiger/cond \
-  --mask_dir ./examples/tiger/mask \
-  --output_dir ./examples/tiger/output \
-  --root_dir ./examples/tiger \
-  --obj_path ./examples/tiger/model \
-  --mode edit \
-  --original_image ./examples/tiger/ori/012.png \
-  --cfg_src 5.0 \
-  --cfg_tar 5.0
-```
-
-### Baseline Mode (image-to-3D without editing)
-
-```bash
-python inference.py \
-  --input_dir ./examples/tiger/cond \
-  --output_dir ./examples/tiger/output \
-  --mode baseline
-```
-
-## ⚙️ Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--checkpoint` | `checkpoint/TRELLIS-image-large` | Pretrained model directory |
-| `--mode` | `baseline` | Run mode: `baseline` \| `edit` |
-| `--preprocess` | off | Run preprocessing only |
-| `--seed` | 1 | Random seed |
-| `--cfg_src` | 5.0 | Source condition CFG strength in FlowEdit |
-| `--cfg_tar` | 5.0 | Target condition CFG strength in FlowEdit |
-| `--enable_step_viz` | off | Export per-step visualization (slower) |
-| `--no_guidance` | off | Disable orthographic silhouette guidance |
-| `--no_gpu` | off | Disable GPU acceleration |
-
-## 🔑 Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `BLENDER_PATH` | Override the default Blender executable path |
-| `CUDA_VISIBLE_DEVICES` | Select GPU device(s) |
-| `SPCONV_ALGO` | SpConv algorithm: `native` (default) or `auto` |
-
-## 📝 How It Works
-
-1. **Preprocessing**: The source 3D model is rendered from 150 viewpoints using Blender, voxelized to a 64³ grid, and per-voxel DINOv2 features are extracted. SS and SLAT latents are pre-computed and cached.
-
-2. **Editing**: Given a user-painted condition image (RGBA, where alpha = edit mask) and a 3D mask mesh (`.glb`), the pipeline:
-   - Extracts a 2D edit mask from the alpha channel
-   - Constructs a 3D latent mask from the mask mesh via SDF/flood-fill
-   - Runs FlowEdit with source/target CFG to produce the edited latent
-   - Decodes the latent to Gaussian splats + mesh and exports as `.glb`
+Edited results are written to `<case>/output/<edit_name>.glb`.
 
 ## 🙏 Acknowledgements
 
-This project builds upon [TRELLIS](https://github.com/Microsoft/TRELLIS) — 3D asset generation via structured latents.
+This project builds upon [TRELLIS](https://github.com/microsoft/TRELLIS) — 3D asset generation via structured latents.
 
 ## 📄 License
 
@@ -218,9 +159,9 @@ This project is released under the [MIT License](LICENSE).
 If you find this work useful, please cite our CVPR 2026 paper:
 
 ```bibtex
-@inproceedings{easy3e2026,
-  title={Easy3E: Easy 3D Editing via FlowEdit},
-  author={},
+@inproceedings{hu2026easy3e,
+  title={Easy3E: Feed-Forward 3D Asset Editing via Rectified Voxel Flow},
+  author={Hu, Shimin and Wei, Yuanyi and Zha, Fei and Guo, Yudong and Zhang, Juyong},
   booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
   year={2026}
 }
