@@ -1,6 +1,6 @@
 <div align="center">
 
-# Easy3E: Easy3E: Feed-Forward 3D Asset Editing via Rectified Voxel Flow
+# Easy3E: Feed-Forward 3D Asset Editing via Rectified Voxel Flow
 
 <h3>CVPR 2026</h3>
 
